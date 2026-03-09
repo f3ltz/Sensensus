@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 Phase 1: The Secure Local Swarm & TinyML (March 6 - March 8)
 
 The focus here is getting the hardware and simulated nodes talking, but now every single packet must be cryptographically signed to prevent Sybil attacks.
@@ -64,3 +65,6 @@ Phase 4: Buffer & Polish (March 15 - March 16)
     Attack Simulation: Manually spin up a malicious Python node that outputs garbage data or bad signatures and record the network rejecting/slashing it. This is your core pitch demonstration.
 
     Documentation & Pitch: Finalize the GitHub README and record the demo video showing the physical drop and the resulting on-chain slash/reward.
+=======
+# Sensensus
+>>>>>>> 6da3c403f5121db6f5ed9c22a800d1cfe9376a72
