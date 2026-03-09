@@ -23,7 +23,8 @@ WINDOW_SIZE        = 50   # rows expected by both models
 
 # ── Network constants (must match config.h)
 MULTICAST_GROUP = '239.0.0.1'
-MULTICAST_PORT  = 5005      # Pico's net_handleUdp() listens here
+MULTICAST_PORT  = 5005      # Pico multicast group (beacons + anomaly broadcasts)
+BID_PORT        = 5006      # Transporter unicast bid listener
 HTTP_PORT       = 8080
 
 # ── Verdict canonical format (agreed between Ranjit and Asrith)
@@ -37,12 +38,15 @@ def _verdict_canonical(pub_hex: str, verdict_bool: bool, confidence: float) -> b
 class AuditorNode:
     def __init__(self,
                  multicast_group: str = MULTICAST_GROUP,
-                 multicast_port:  int = MULTICAST_PORT):
+                 multicast_port:  int = MULTICAST_PORT,
+                 key_path:        str = "./identity.pem"):
 
         # ── Cryptographic identity (NIST P-256 — matches Pico's micro-ecc secp256r1)
-        self.sk       = SigningKey.generate(curve=NIST256p)
-        self.vk       = self.sk.verifying_key
-        self.pub_bytes = self.vk.to_string()   # 64 bytes: X‖Y
+        # Key is persisted to disk so identity survives restarts.
+        # The same pubkey stays registered on the Flow contract and keeps its
+        # reputation score across reboots.
+        self.sk, self.vk = self._load_or_generate_keypair(key_path)
+        self.pub_bytes = self.vk.to_string()   # 64 bytes: X||Y
         self.pub_hex   = self.pub_bytes.hex()  # 128 hex chars
 
         self.multicast_group = multicast_group
@@ -61,6 +65,25 @@ class AuditorNode:
     # ──────────────────────────────────────────────────────────────────────────
     # Crypto helpers
     # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _load_or_generate_keypair(key_path: str):
+        """
+        Load an existing NIST P-256 private key from PEM, or generate and
+        persist a new one if the file doesn't exist.
+        The public key is always derived from the private key — no separate file needed.
+        """
+        import os
+        if os.path.exists(key_path):
+            with open(key_path, "rb") as f:
+                sk = SigningKey.from_pem(f.read())
+            print(f"[*] Loaded existing identity from {key_path}")
+        else:
+            sk = SigningKey.generate(curve=NIST256p)
+            with open(key_path, "wb") as f:
+                f.write(sk.to_pem())
+            print(f"[*] Generated new identity, saved to {key_path}")
+        return sk, sk.verifying_key
 
     def _sign(self, data: bytes) -> bytes:
         """Sign raw bytes with SHA-256, matching Ranjit's signPayload() in crypto.cpp."""
@@ -100,7 +123,7 @@ class AuditorNode:
             assert len(packet) == 129, f"Beacon size mismatch: {len(packet)}"
 
             sock.sendto(packet, (self.multicast_group, self.multicast_port))
-            print("[Beacon] Sent 129-byte presence beacon.")
+            #print("[Beacon] Sent 129-byte presence beacon.")
             time.sleep(5)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -163,11 +186,13 @@ class AuditorNode:
         packet      = msg_to_sign + self._sign(msg_to_sign)
         assert len(packet) == 129, f"Bid size mismatch: {len(packet)}"
 
-        sock.sendto(packet, (transporter_ip, self.multicast_port))
-        print(f"[Bid] Sent 129-byte bid to {transporter_ip}:{self.multicast_port}")
+        sock.sendto(packet, (transporter_ip, BID_PORT))
+        print(f"[Bid] Sent 129-byte bid to {transporter_ip}:{BID_PORT}")
 
-        # Wait for Pico's 500 ms quorum collection window to close
-        time.sleep(0.6)
+        # Wait for transporter's bid window to close AND quorum to be finalised.
+        # Must be strictly greater than BID_WINDOW_S (0.6s) on the transporter,
+        # otherwise GET /data arrives before state.quorum is populated → false 403.
+        time.sleep(0.9)
         self._execute_x402_purchase(transporter_ip)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -188,11 +213,16 @@ class AuditorNode:
         base_url = f"http://{transporter_ip}:{HTTP_PORT}"
 
         try:
-            # ── Step 1
-            resp = requests.get(f"{base_url}/data", timeout=3)
+            # ── Step 1: include pubkey so transporter keys nonce by identity not IP
+            resp = requests.get(f"{base_url}/data", params={"pubkey": self.pub_hex}, timeout=3)
 
             if resp.status_code == 403:
-                print("[x402] Not selected for quorum. Standing down.")
+                reason = ""
+                try:
+                    reason = resp.json().get("error", "")
+                except Exception:
+                    pass
+                print(f"[x402] 403 — {reason if reason else 'not in quorum'}. Standing down.")
                 return
 
             if resp.status_code != 402:
@@ -308,7 +338,17 @@ class AuditorNode:
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    auditor = AuditorNode()
+    import argparse
+    parser = argparse.ArgumentParser(description="Swarm Auditor Node")
+    parser.add_argument(
+        "--key-file",
+        default="./identity.pem",
+        help="Path to PEM file for persistent ECDSA identity (default: ./identity.pem). "
+             "Created on first run if it does not exist.",
+    )
+    args = parser.parse_args()
+
+    auditor = AuditorNode(key_path=args.key_file)
     threading.Thread(target=auditor.broadcast_presence,  daemon=True).start()
     threading.Thread(target=auditor.listen_for_anomalies, daemon=True).start()
     while True:
