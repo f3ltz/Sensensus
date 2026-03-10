@@ -3,47 +3,79 @@ mock_transporter.py
 Simulates the Pico 2W Transporter for local auditor testing.
 
 Implements the full protocol:
-  - UDP multicast: receives beacons (0x01), receives bids (0x02), broadcasts anomaly (0x03)
-  - HTTP server: GET /data  → 402 + nonce
-                 POST /pay  → 200 with CSV + signed payload
-                 POST /verdict → collects verdicts, runs consensus, prints result
+  UDP:
+    - Receives signed beacons  (PKT_BEACON  0x01, 129 bytes) via multicast
+    - Receives signed bids     (PKT_BID     0x02, 137 bytes) via unicast BID_PORT
+    - Broadcasts signed anomaly (PKT_ANOMALY 0x03, 133 bytes) via multicast
+    - Sends signed quorum notif (PKT_QUORUM  0x04, 129 bytes) directed unicast
+
+  HTTP (simulates both Pico endpoints and the Flow contract in dev mode):
+    GET  /data?pubkey=<hex>  → 402 + nonce
+    POST /pay               → 200 with { csv, payload }
+    POST /verdict           → simulates Flow contract submitVerdict()
+    GET  /state             → dashboard snapshot
+
+Three-phase settlement (mirrors SwarmVerifierV2.cdc):
+  Phase 1 — registerAnomaly: after quorum selected, submission_sig computed,
+             escrow locked (simulated), event registered in pending_events.
+  Phase 2 — submitVerdict:  each auditor posts to /verdict independently.
+             Mock validates fields, signature, quorum membership, no duplicates.
+  Phase 3 — finalizeEvent:  triggered when all verdicts received or timeout.
+             Silent auditors counted as verdict=False, confidence=0.0.
+             Transporter slashed if consensus contradicts their claim.
+             After finalization: simulate Storacha upload → fake CID → updateEventCid.
+
+Bid packet: 137 bytes
+  [0x02 | pubkey 64B | price float64 LE 8B | sig over bytes 0-72, 64B]
 """
 
+import base64
+import hashlib
+import json
+import secrets
 import socket
 import struct
-import hashlib
-import secrets
 import threading
-import requests
 import time
-import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlparse
+
 import numpy as np
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from ecdsa import SigningKey, VerifyingKey, NIST256p, BadSignatureError
+import requests
+from ecdsa import NIST256p, BadSignatureError, SigningKey, VerifyingKey
 
 # ── Protocol constants (must match config.h and auditor.py) ──────────────────
 MULTICAST_GROUP    = "239.0.0.1"
 MULTICAST_PORT     = 5005
-BID_PORT           = 5006   # dedicated unicast port for bid reception
+BID_PORT           = 5006
 HTTP_PORT          = 8080
 
 CSV_BUFFER_SAMPLES = 75
 WINDOW_SIZE        = 50
 
-BID_WINDOW_S       = 0.6    # how long to collect bids before selecting quorum
-VERDICT_TIMEOUT_S  = 30.0   # how long to wait for all verdicts
+BID_WINDOW_S      = 0.6    # collect bids before selecting quorum
+VERDICT_TIMEOUT_S = 30.0   # wait for all quorum verdicts before force-finalizing
 
-# Reputation formula constants (must match SwarmVerifier.cdc)
+# Quorum scoring weights (must match QUORUM_W_* build flags in config.h)
+W_PRICE = 0.5
+W_REP   = 0.3
+W_STAKE = 0.2
+QUORUM_SIZE = 3
+
+# Reputation formula constants (must match SwarmVerifierV2.cdc)
 ALPHA = 10.0
 BETA  = 5.0
 
+# Anomaly confidence threshold (must match ANOMALY_CONFIDENCE_THRESHOLD in config.h)
+ANOMALY_THRESHOLD = 0.85
+
 # ── Flow testnet config ───────────────────────────────────────────────────────
-# Set FLOW_ENABLED = False to skip on-chain quorum ranking during local testing.
-FLOW_ENABLED         = False   # flip to True once contract is deployed
-FLOW_REST_URL        = "https://rest-testnet.onflow.org/v1/scripts"
-FLOW_CONTRACT_ADDR   = "0xYOUR_TESTNET_ADDRESS"   # replace after deployment
-FLOW_CONTRACT_NAME   = "SwarmVerifierV2"
-QUORUM_SIZE          = 3       # max auditors in quorum
+# Set FLOW_ENABLED = True once SwarmVerifierV2 is deployed to testnet.
+# When False: quorum scoring uses local bid prices only (no stake/rep lookup).
+FLOW_ENABLED       = False
+FLOW_REST_URL      = "https://rest-testnet.onflow.org/v1/scripts"
+FLOW_CONTRACT_ADDR = "0xYOUR_TESTNET_ADDRESS"
+FLOW_CONTRACT_NAME = "SwarmVerifierV2"
 
 
 # ── Crypto helpers ────────────────────────────────────────────────────────────
@@ -64,38 +96,32 @@ def _verify(payload: bytes, sig: bytes, pubkey_bytes: bytes) -> bool:
 
 def _generate_drop_csv(n_rows: int = CSV_BUFFER_SAMPLES) -> str:
     """
-    Generates a CSV that looks like a real drop event:
-      - First ~40 rows: normal idle motion (low linear accel)
-      - Last ~35 rows:  drop signature (near-zero accel briefly, then impact spike)
+    Generates a CSV resembling a real drop event:
+      Rows 0-37  : normal idle motion (low noise)
+      Rows 38-56 : free-fall (near-zero linear acceleration)
+      Rows 57-74 : impact spike
     Columns: timestamp_ms,ax,ay,az,qw,qx,qy,qz
     """
     rows = []
-    t    = int(time.time() * 1000) - n_rows * 20  # 50Hz → 20ms per sample
+    t    = int(time.time() * 1000) - n_rows * 20   # 50 Hz → 20 ms/sample
 
     for i in range(n_rows):
         phase = i / n_rows
-
         if phase < 0.5:
-            # Idle: small random noise
             ax, ay, az = np.random.normal(0, 0.05, 3)
         elif phase < 0.75:
-            # Free-fall: near-zero linear acceleration
             ax, ay, az = np.random.normal(0, 0.01, 3)
         else:
-            # Impact spike
-            ax = np.random.normal(0,   2.0)
-            ay = np.random.normal(0,   2.0)
+            ax = np.random.normal(0,    2.0)
+            ay = np.random.normal(0,    2.0)
             az = np.random.normal(-9.8, 3.0)
 
-        # Quaternion: nearly identity with tiny drift
         qw = 1.0 + np.random.normal(0, 0.005)
         qx, qy, qz = np.random.normal(0, 0.005, 3)
-
         rows.append(f"{t},{ax:.6f},{ay:.6f},{az:.6f},{qw:.6f},{qx:.6f},{qy:.6f},{qz:.6f}")
         t += 20
 
-    header = "timestamp_ms,ax,ay,az,qw,qx,qy,qz"
-    return header + "\n" + "\n".join(rows)
+    return "timestamp_ms,ax,ay,az,qw,qx,qy,qz\n" + "\n".join(rows)
 
 
 # ── Shared transporter state ──────────────────────────────────────────────────
@@ -108,37 +134,50 @@ class TransporterState:
         self.pub_hex   = self.pub_bytes.hex()
 
         # Auditor registry: pubkey_hex → { ip, last_seen }
-        self.registry: dict[str, dict] = {}
+        self.registry      = {}
         self.registry_lock = threading.Lock()
 
-        # Bid collection
-        self.bids: list[dict] = []          # [ {pubkey_hex, ip} ]
-        self.bids_lock        = threading.Lock()
-        self.collecting_bids  = False
+        # Bid collection: pubkey_hex → { ip, price }
+        self.bids          = {}   # dict keyed by pubkey_hex to prevent duplicates
+        self.bids_lock     = threading.Lock()
+        self.collecting_bids = False
 
-        # Quorum (set after bid window closes)
-        self.quorum: set[str] = set()       # pubkey_hex strings
+        # Quorum: pubkey_hex → ip (set after bid window closes)
+        self.quorum = {}
 
-        # x402 nonce: pubkey_hex → nonce_bytes (refreshed each GET /data)
-        self.nonces: dict[str, bytes] = {}
+        # x402 nonces: pubkey_hex → nonce_bytes (refreshed each GET /data)
+        self.nonces      = {}
         self.nonces_lock = threading.Lock()
 
-        # Verdict pool: pubkey_hex → { verdict, confidence, signature }
-        self.verdicts: dict[str, dict] = {}
-        self.verdicts_lock = threading.Lock()
-        self.collecting_verdicts = False
-        self.expected_verdicts   = 0
+        # Per-event payload sigs: pubkey_hex → payload_sig_hex
+        # Used to validate that an auditor's verdict refers to data they actually received.
+        self.issued_payload_sigs      = {}
+        self.issued_payload_sigs_lock = threading.Lock()
 
-        # Current anomaly
+        # Current event
+        self.current_event_id:   str   = ""   # submission_sig — unique per event
         self.anomaly_confidence: float = 0.93
-        self.csv_data: str = ""
+        self.csv_data:           str   = ""
+
+        # Pending verdicts for the current event: pubkey_hex → verdict dict
+        self.verdicts      = {}
+        self.verdicts_lock = threading.Lock()
+        self.expected_verdicts = 0
+
+        # Dashboard
+        self.system_status  = "IDLE"   # IDLE | ANOMALY | DELIVERING
+        self.settled_events = []        # last 20 finalized events
+        self.events_lock    = threading.Lock()
+        self.last_quat      = {"qw": 1.0, "qx": 0.0, "qy": 0.0, "qz": 0.0}
 
         print(f"[Transporter] pubkey={self.pub_hex[:16]}...")
 
+    # ── Packet builders ───────────────────────────────────────────────────────
+
     def build_anomaly_packet(self) -> bytes:
         """
-        133 bytes:
-          byte 0      : 0x03
+        PKT_ANOMALY (0x03, 133 bytes):
+          byte  0     : 0x03
           bytes 1-64  : transporter pubkey
           bytes 65-68 : confidence float32 LE
           bytes 69-132: ECDSA sig over bytes 0-68
@@ -151,17 +190,59 @@ class TransporterState:
         assert len(packet) == 133
         return packet
 
+    def build_quorum_packet(self, auditor_pubkey_bytes: bytes) -> bytes:
+        """
+        PKT_QUORUM (0x04, 129 bytes):
+          byte  0     : 0x04
+          bytes 1-64  : nominated auditor pubkey
+          bytes 65-128: ECDSA sig over bytes 0-64, signed by TRANSPORTER
+
+        The auditor verifies:
+          1. Sig is valid using the transporter pubkey (known from PKT_ANOMALY)
+          2. bytes 1-64 == own pubkey
+        """
+        header  = struct.pack('<B', 0x04) + auditor_pubkey_bytes   # 65 bytes
+        sig     = _sign(self.sk, header)
+        packet  = header + sig
+        assert len(packet) == 129
+        return packet
+
+    def build_submission_sig(self, quorum_ids: list) -> str:
+        """
+        Computes the submission_sig that acts as the unique event ID on the
+        Flow contract. Signs: transporter_pubkey + anomaly_confidence + timestamp
+        + all quorum pubkeys. This is the 'submissionSig' field in registerAnomaly.
+        """
+        canonical = json.dumps({
+            "transporter_pubkey": self.pub_hex,
+            "anomaly_confidence": self.anomaly_confidence,
+            "timestamp_ms":       int(time.time() * 1000),
+            "quorum_ids":         sorted(quorum_ids),
+        }, separators=(',', ':')).encode()
+        return _sign(self.sk, canonical).hex()
+
     def build_payload_json(self, auditor_pubkey_hex: str) -> dict:
-        """Signed JSON payload served inside the x402 200 response."""
+        """
+        Signed payload served inside the x402 200 response.
+        payload_signature is per-auditor — it ties the auditor's verdict to
+        the specific data they received. The auditor must include this in their
+        verdict body so the contract can verify the chain of custody.
+        """
         body = {
-            "transporter_pubkey":    self.pub_hex,
-            "winning_auditor_pubkey": auditor_pubkey_hex,
-            "anomaly_confidence":    self.anomaly_confidence,
-            "timestamp_ms":          int(time.time() * 1000),
+            "transporter_pubkey":  self.pub_hex,
+            "auditor_pubkey":      auditor_pubkey_hex,
+            "anomaly_confidence":  self.anomaly_confidence,
+            "timestamp_ms":        int(time.time() * 1000),
+            "event_id":            self.current_event_id,
         }
         canonical = json.dumps(body, separators=(',', ':')).encode()
         sig_hex   = _sign(self.sk, canonical).hex()
         body["payload_signature"] = sig_hex
+
+        # Record so we can validate the auditor sends it back in their verdict
+        with self.issued_payload_sigs_lock:
+            self.issued_payload_sigs[auditor_pubkey_hex] = sig_hex
+
         return body
 
 
@@ -173,59 +254,44 @@ state = TransporterState()
 class TransporterHTTP(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
-        # Suppress default Apache-style logs; we print our own
-        pass
+        pass   # suppress default Apache-style logs
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin",  "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
 
     def _send_json(self, code: int, obj: dict):
         body = json.dumps(obj).encode()
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type",   "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self._cors()
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
-        from urllib.parse import urlparse, parse_qs
         parsed    = urlparse(self.path)
         client_ip = self.client_address[0]
 
-        if parsed.path != "/data":
-            self._send_json(404, {"error": "not found"})
+        if parsed.path == "/state":
+            self._handle_state()
             return
-
-        # Auditor passes ?pubkey=<128 hex> so nonces are keyed by identity,
-        # not IP. Fixes the nonce-overwrite bug when multiple auditors share a host.
-        params     = parse_qs(parsed.query)
-        pubkey_hex = params.get("pubkey", [None])[0]
-
-        if not pubkey_hex or len(pubkey_hex) != 128:
-            self._send_json(400, {"error": "missing or invalid ?pubkey query param"})
+        if parsed.path == "/data":
+            params     = parse_qs(parsed.query)
+            pubkey_hex = params.get("pubkey", [None])[0]
+            self._handle_data(pubkey_hex, client_ip)
             return
-
-        if not state.quorum:
-            self._send_json(403, {"error": "no active quorum"})
-            return
-
-        if pubkey_hex not in state.quorum:
-            print(f"[HTTP] GET /data {client_ip} pubkey={pubkey_hex[:12]}... -> 403 not in quorum")
-            self._send_json(403, {"error": "pubkey not in quorum"})
-            return
-
-        nonce = secrets.token_bytes(16)
-        with state.nonces_lock:
-            state.nonces[pubkey_hex] = nonce
-
-        print(f"[HTTP] GET /data {client_ip} pubkey={pubkey_hex[:12]}... -> 402 nonce={nonce.hex()}")
-        self._send_json(402, {
-            "status":      "payment_required",
-            "endpoint":    "/pay",
-            "nonce":       nonce.hex(),
-            "description": "Sign the nonce with your private key to receive IMU data",
-        })
+        self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
-        length  = int(self.headers.get("Content-Length", 0))
-        raw     = self.rfile.read(length)
+        length = int(self.headers.get("Content-Length", 0))
+        raw    = self.rfile.read(length)
         try:
             body = json.loads(raw)
         except json.JSONDecodeError:
@@ -235,28 +301,102 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         if self.path == "/pay":
             self._handle_pay(body)
         elif self.path == "/verdict":
+            # Simulates SwarmVerifierV2.submitVerdict() in dev mode.
+            # When FLOW_ENABLED=True, auditors post directly to the contract
+            # and this endpoint is unused.
             self._handle_verdict(body)
         else:
             self._send_json(404, {"error": "not found"})
 
-    def _handle_pay(self, body: dict):
-        client_ip = self.client_address[0]
+    # ── GET /state ────────────────────────────────────────────────────────────
 
+    def _handle_state(self):
+        with state.registry_lock:
+            registry = {
+                pub: {
+                    "ip":        info["ip"],
+                    "last_seen": info["last_seen"],
+                    "active":    (time.time() - info["last_seen"]) < 15,
+                }
+                for pub, info in state.registry.items()
+            }
+
+        with state.bids_lock:
+            quorum = list(state.quorum.keys())
+
+        with state.verdicts_lock:
+            verdicts = {
+                pub: {
+                    "verdict":    v["verdict"],
+                    "confidence": v["confidence"],
+                    "ip":         v["ip"],
+                    "aligned":    v.get("aligned"),
+                }
+                for pub, v in state.verdicts.items()
+            }
+
+        with state.events_lock:
+            events = list(state.settled_events)
+
+        self._send_json(200, {
+            "transporter_pubkey":  state.pub_hex,
+            "system_status":       state.system_status,
+            "anomaly_confidence":  state.anomaly_confidence,
+            "current_event_id":    state.current_event_id,
+            "registry":            registry,
+            "quorum":              quorum,
+            "verdicts":            verdicts,
+            "last_quat":           state.last_quat,
+            "settled_events":      events,
+            "ts":                  time.time(),
+        })
+
+    # ── GET /data ─────────────────────────────────────────────────────────────
+
+    def _handle_data(self, pubkey_hex, client_ip):
+        if not pubkey_hex or len(pubkey_hex) != 128:
+            self._send_json(400, {"error": "missing or invalid ?pubkey query param"})
+            return
+
+        if not state.quorum:
+            self._send_json(403, {"error": "no active quorum"})
+            return
+
+        if pubkey_hex not in state.quorum:
+            print(f"[HTTP] GET /data {client_ip} pubkey={pubkey_hex[:12]}... → 403 not in quorum")
+            self._send_json(403, {"error": "pubkey not in quorum"})
+            return
+
+        nonce = secrets.token_bytes(16)
+        with state.nonces_lock:
+            state.nonces[pubkey_hex] = nonce
+
+        print(f"[HTTP] GET /data {client_ip} pubkey={pubkey_hex[:12]}... → 402 nonce={nonce.hex()[:12]}...")
+        self._send_json(402, {
+            "status":      "payment_required",
+            "endpoint":    "/pay",
+            "nonce":       nonce.hex(),
+            "description": "Sign the nonce with your private key to receive IMU data",
+        })
+
+    # ── POST /pay ─────────────────────────────────────────────────────────────
+
+    def _handle_pay(self, body: dict):
+        client_ip  = self.client_address[0]
         pubkey_hex = body.get("pubkey", "")
         sig_hex    = body.get("signature", "")
 
         if len(pubkey_hex) != 128 or len(sig_hex) != 128:
-            self._send_json(400, {"error": "pubkey and signature must each be 128 hex chars"})
+            self._send_json(400, {"error": "pubkey and signature must be 128 hex chars each"})
             return
 
         with state.nonces_lock:
             nonce = state.nonces.get(pubkey_hex)
 
         if not nonce:
-            self._send_json(403, {"error": "no pending nonce for this pubkey -- call GET /data first"})
+            self._send_json(403, {"error": "no pending nonce for this pubkey — call GET /data first"})
             return
 
-        # Verify signature over nonce
         try:
             pub_bytes = bytes.fromhex(pubkey_hex)
             sig_bytes = bytes.fromhex(sig_hex)
@@ -265,133 +405,247 @@ class TransporterHTTP(BaseHTTPRequestHandler):
             return
 
         if not _verify(nonce, sig_bytes, pub_bytes):
-            print(f"[HTTP] POST /pay from {client_ip} → 403 bad signature")
+            print(f"[HTTP] POST /pay {client_ip} → 403 bad signature")
             self._send_json(403, {"error": "signature verification failed"})
             return
 
-        # Quorum check
         if pubkey_hex not in state.quorum:
-            print(f"[HTTP] POST /pay from {client_ip} → 403 not in quorum")
+            print(f"[HTTP] POST /pay {client_ip} → 403 not in quorum")
             self._send_json(403, {"error": "pubkey not in quorum"})
             return
 
-        print(f"[HTTP] POST /pay from {client_ip} pubkey={pubkey_hex[:12]}... -> 200 OK")
+        # Invalidate nonce immediately — prevents replay
+        with state.nonces_lock:
+            state.nonces.pop(pubkey_hex, None)
+
+        print(f"[HTTP] POST /pay {client_ip} pubkey={pubkey_hex[:12]}... → 200 OK")
         payload = state.build_payload_json(pubkey_hex)
         self._send_json(200, {
             "csv":     state.csv_data,
             "payload": payload,
         })
 
-        # Invalidate nonce
-        with state.nonces_lock:
-            state.nonces.pop(pubkey_hex, None)
+    # ── POST /verdict  (simulates SwarmVerifierV2.submitVerdict) ─────────────
 
     def _handle_verdict(self, body: dict):
-        client_ip  = self.client_address[0]
+        """
+        Simulates the Flow contract's submitVerdict() function.
 
-        auditor_pub = body.get("auditor_pubkey", "")
-        verdict     = body.get("verdict")
-        confidence  = body.get("verdict_confidence")
-        sig_hex     = body.get("auditor_verdict_signature", "")
+        Expected fields (must match auditor._submit_verdict body):
+          auditor_pubkey      — 128 hex chars
+          verdict             — bool
+          verdict_confidence  — float 0.0–1.0
+          payload_signature   — hex sig the transporter issued in the 200 response
+          verdict_signature   — auditor's ECDSA sig over canonical string
+          csv_cid             — always "" from auditors (Storacha upload is transporter's job)
+        """
+        client_ip = self.client_address[0]
 
-        # Basic field validation
-        if not all([auditor_pub, verdict is not None, confidence is not None, sig_hex]):
-            self._send_json(400, {"error": "missing fields"})
+        auditor_pub       = body.get("auditor_pubkey",     "")
+        verdict           = body.get("verdict")
+        confidence        = body.get("verdict_confidence")
+        payload_sig_hex   = body.get("payload_signature",  "")
+        verdict_sig_hex   = body.get("verdict_signature",  "")
+        csv_cid           = body.get("csv_cid",            "")   # accepted but always ""
+
+        # ── Field presence check
+        missing = [f for f, v in [
+            ("auditor_pubkey",    auditor_pub),
+            ("verdict",          verdict),
+            ("verdict_confidence", confidence),
+            ("payload_signature", payload_sig_hex),
+            ("verdict_signature", verdict_sig_hex),
+        ] if v is None or v == ""]
+        if missing:
+            self._send_json(400, {"error": f"missing fields: {missing}"})
             return
 
+        # ── Quorum membership
         if auditor_pub not in state.quorum:
-            print(f"[HTTP] POST /verdict from {client_ip} → 403 not in quorum")
+            print(f"[Verdict] {client_ip} pubkey={auditor_pub[:12]}... → 403 not in quorum")
             self._send_json(403, {"error": "not in quorum"})
             return
 
-        # Verify verdict signature
-        # Canonical: "<pubkey_hex>:<0 or 1>:<confidence:.4f>"
+        # ── Duplicate check
+        with state.verdicts_lock:
+            if auditor_pub in state.verdicts:
+                self._send_json(409, {"error": "verdict already received from this auditor"})
+                return
+
+        # ── Verify payload_signature matches what we issued to this auditor
+        with state.issued_payload_sigs_lock:
+            expected_payload_sig = state.issued_payload_sigs.get(auditor_pub, "")
+        if payload_sig_hex != expected_payload_sig:
+            print(f"[Verdict] {client_ip} pubkey={auditor_pub[:12]}... → 403 payload_sig mismatch")
+            self._send_json(403, {"error": "payload_signature does not match issued value"})
+            return
+
+        # ── Verify verdict signature
+        # Canonical: "<128-hex-pubkey>:<0 or 1>:<confidence:.4f>"
         canonical = f"{auditor_pub}:{int(verdict)}:{float(confidence):.4f}".encode()
         try:
             pub_bytes = bytes.fromhex(auditor_pub)
-            sig_bytes = bytes.fromhex(sig_hex)
+            sig_bytes = bytes.fromhex(verdict_sig_hex)
         except ValueError:
             self._send_json(400, {"error": "hex decode failed"})
             return
 
         if not _verify(canonical, sig_bytes, pub_bytes):
-            print(f"[HTTP] POST /verdict from {client_ip} → 403 bad signature")
+            print(f"[Verdict] {client_ip} pubkey={auditor_pub[:12]}... → 403 bad verdict sig")
             self._send_json(403, {"error": "verdict signature verification failed"})
             return
 
         with state.verdicts_lock:
-            if auditor_pub in state.verdicts:
-                self._send_json(409, {"error": "verdict already received"})
-                return
             state.verdicts[auditor_pub] = {
-                "verdict":    bool(verdict),
-                "confidence": float(confidence),
-                "signature":  sig_hex,
-                "ip":         client_ip,
+                "verdict":          bool(verdict),
+                "confidence":       float(confidence),
+                "payload_signature": payload_sig_hex,
+                "verdict_signature": verdict_sig_hex,
+                "ip":               client_ip,
             }
             count = len(state.verdicts)
 
-        print(f"[HTTP] Verdict from {client_ip[:8]}... → {'DROP' if verdict else 'NORMAL'} "
-              f"conf={confidence:.4f} ({count}/{state.expected_verdicts})")
+        label = "DROP" if verdict else "NORMAL"
+        print(f"[Verdict] {client_ip} pubkey={auditor_pub[:12]}... → {label} "
+              f"conf={float(confidence):.4f} ({count}/{state.expected_verdicts})")
         self._send_json(200, {"status": "received"})
 
         if count >= state.expected_verdicts:
-            threading.Thread(target=_run_consensus, daemon=True).start()
+            threading.Thread(target=_finalize_event, daemon=True).start()
 
 
-# ── Consensus ─────────────────────────────────────────────────────────────────
+# ── Consensus / finalization  (mirrors SwarmVerifierV2.finalizeEvent) ────────
 
-def _run_consensus():
+def _finalize_event():
+    """
+    Phase 3: compute Cswarm, majority verdict, reputation deltas, transporter
+    slash. Then simulate Storacha upload and updateEventCid.
+
+    Silent auditors (in quorum but no verdict received) are treated as
+    verdict=False, confidence=0.0 — identical penalty to wrong verdict.
+    This closes the free-rider attack described in the architecture doc.
+    """
     with state.verdicts_lock:
-        verdicts = dict(state.verdicts)
+        received = dict(state.verdicts)
 
-    if not verdicts:
+    quorum_ids = list(state.quorum.keys())
+    n          = len(quorum_ids)
+
+    if n == 0:
         return
 
-    confidences = [v["confidence"] for v in verdicts.values()]
-    drop_votes  = sum(1 for v in verdicts.values() if v["verdict"])
-    n           = len(verdicts)
+    # ── Build full verdict set including silent auditors ─────────────────────
+    all_verdicts = {}
+    for pub in quorum_ids:
+        if pub in received:
+            all_verdicts[pub] = received[pub]
+        else:
+            # Silent — penalised same as wrong verdict
+            all_verdicts[pub] = {
+                "verdict":    False,
+                "confidence": 0.0,
+                "ip":         state.quorum.get(pub, "?"),
+                "silent":     True,
+            }
 
-    cswarm           = sum(confidences) / n
-    consensus_result = drop_votes > (n // 2)
+    # ── Cswarm and majority vote ──────────────────────────────────────────────
+    confidences = [v["confidence"] for v in all_verdicts.values()]
+    drop_votes  = sum(1 for v in all_verdicts.values() if v["verdict"])
+    cswarm      = sum(confidences) / n
+    consensus_verdict = drop_votes > (n // 2)
 
-    print("\n" + "═" * 60)
-    print(f"  CONSENSUS RESULT")
-    print("═" * 60)
-    print(f"  Auditors     : {n}")
+    # ── Per-auditor reputation delta and alignment ────────────────────────────
+    auditor_results = []
+    for pub in quorum_ids:
+        v       = all_verdicts[pub]
+        aligned = (v["verdict"] == consensus_verdict) and not v.get("silent", False)
+        delta   = ALPHA * (cswarm - v["confidence"]) - (BETA if not aligned else 0.0)
+        auditor_results.append({
+            "pubkey_hex": pub,
+            "ip":         v.get("ip", "?"),
+            "verdict":    v["verdict"],
+            "confidence": v["confidence"],
+            "aligned":    aligned,
+            "silent":     v.get("silent", False),
+            "delta":      round(delta, 4),
+        })
+
+    # Update alignment flags in live verdicts dict (dashboard reads these)
+    with state.verdicts_lock:
+        for r in auditor_results:
+            if r["pubkey_hex"] in state.verdicts:
+                state.verdicts[r["pubkey_hex"]]["aligned"] = r["aligned"]
+
+    # ── Transporter slashing ──────────────────────────────────────────────────
+    # Transporter claimed a drop (confidence >= threshold).
+    # If consensus disagrees, transporter is slashed.
+    transporter_claimed_drop = state.anomaly_confidence >= ANOMALY_THRESHOLD
+    transporter_slashed      = transporter_claimed_drop != consensus_verdict
+
+    # ── Print settlement summary ──────────────────────────────────────────────
+    print("\n" + "═" * 64)
+    print(f"  SETTLEMENT — event_id={state.current_event_id[:16]}...")
+    print("═" * 64)
+    print(f"  Auditors     : {n}  (received: {len(received)}  silent: {n - len(received)})")
     print(f"  Drop votes   : {drop_votes}/{n}")
     print(f"  Cswarm       : {cswarm:.4f}")
-    print(f"  Consensus    : {'DROP CONFIRMED' if consensus_result else 'NORMAL — FALSE POSITIVE'}")
-    print("─" * 60)
+    print(f"  Consensus    : {'DROP CONFIRMED' if consensus_verdict else 'NORMAL — false positive'}")
+    print(f"  Transporter  : conf={state.anomaly_confidence:.4f}  "
+          f"claimed_drop={transporter_claimed_drop}  "
+          f"slashed={transporter_slashed}")
+    print("─" * 64)
+    for r in auditor_results:
+        status  = "✓ aligned" if r["aligned"] else ("✗ silent" if r["silent"] else "✗ deviated")
+        verdict = "DROP" if r["verdict"] else "NORM"
+        print(f"  {r['pubkey_hex'][:12]}...  {verdict}  conf={r['confidence']:.4f}  "
+              f"ΔR={r['delta']:+.4f}  {status}")
+    print("═" * 64)
 
-    for pub, v in verdicts.items():
-        v_agent = v["confidence"]
-        aligned = v["verdict"] == consensus_result
-        delta   = ALPHA * (cswarm - v_agent) - (BETA if not aligned else 0.0)
-        status  = "✓ aligned" if aligned else "✗ deviated"
-        print(f"  {pub[:12]}...  verdict={'DROP' if v['verdict'] else 'NORM'}  "
-              f"conf={v_agent:.4f}  ΔR={delta:+.4f}  {status}")
+    # ── Simulate post-consensus Storacha upload ───────────────────────────────
+    # In production: transporter receives AnomalySettled event from Flow,
+    # then uploads the full bundle (CSV + all verdicts + consensus result +
+    # all signatures) to Storacha and calls updateEventCid on the contract.
+    # Here we just generate a plausible-looking fake CID.
+    print("[Storacha] Simulating post-consensus bundle upload...")
+    time.sleep(0.3)   # simulate upload latency
+    cid      = "bafyrei" + secrets.token_hex(16)
+    flow_tx  = "0x"   + secrets.token_hex(8)
+    print(f"[Storacha] CID={cid}")
+    print(f"[Flow]     updateEventCid → tx={flow_tx}")
+    print("═" * 64 + "\n")
 
-    print("═" * 60)
-    print("  [NOTE] In production: upload CSV → Storacha, POST to Flow contract")
-    print("═" * 60 + "\n")
+    # ── Store finalized event for /state dashboard ────────────────────────────
+    event = {
+        "event_id":           state.current_event_id,
+        "timestamp":          time.time(),
+        "anomaly_confidence": state.anomaly_confidence,
+        "cswarm":             round(cswarm, 4),
+        "consensus_verdict":  consensus_verdict,
+        "drop_votes":         drop_votes,
+        "total_auditors":     n,
+        "transporter_slashed": transporter_slashed,
+        "auditor_results":    auditor_results,
+        "storacha_cid":       cid,
+        "flow_tx":            flow_tx,
+    }
+    with state.events_lock:
+        state.settled_events.insert(0, event)
+        state.settled_events = state.settled_events[:20]
+
+    state.system_status = "IDLE"
 
 
 # ── UDP listeners ─────────────────────────────────────────────────────────────
-# Beacons arrive via multicast; bids are unicast to a dedicated port.
-# Keeping them on separate sockets avoids the multicast socket silently dropping
-# unicast packets on some Linux network configurations.
 
 def multicast_listener():
-    """Receives signed beacons (0x01) from auditors via multicast."""
+    """Receives signed beacons (PKT_BEACON 0x01, 129 bytes) via multicast."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(('', MULTICAST_PORT))
     mreq = struct.pack("4sl", socket.inet_aton(MULTICAST_GROUP), socket.INADDR_ANY)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-
-    print(f"[UDP] Multicast listener on {MULTICAST_GROUP}:{MULTICAST_PORT} (beacons)")
+    print(f"[UDP] Multicast listener on {MULTICAST_GROUP}:{MULTICAST_PORT}")
 
     while True:
         data, addr = sock.recvfrom(1024)
@@ -400,83 +654,88 @@ def multicast_listener():
 
 
 def bid_listener():
-    """Receives signed bids (0x02) from auditors via unicast on BID_PORT."""
+    """
+    Receives signed bids (PKT_BID 0x02, 137 bytes) via unicast on BID_PORT.
+
+    Bid format (137 bytes):
+      byte  0     : 0x02
+      bytes 1-64  : auditor pubkey
+      bytes 65-72 : bid price float64 LE
+      bytes 73-136: ECDSA sig over bytes 0-72
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('', BID_PORT))
-
-    print(f"[UDP] Bid listener on 0.0.0.0:{BID_PORT} (unicast bids)")
+    print(f"[UDP] Bid listener on 0.0.0.0:{BID_PORT}")
 
     while True:
         data, addr = sock.recvfrom(1024)
-        if len(data) == 129 and data[0] == 0x02:
+        if len(data) == 137 and data[0] == 0x02:
             _handle_bid(data, addr)
 
 
 def _handle_beacon(data: bytes, addr):
-    pubkey_bytes = data[1:65]
-    sig          = data[65:129]
+    pub_bytes     = data[1:65]
+    sig           = data[65:129]
     signed_region = data[0:65]
 
-    if not _verify(signed_region, sig, pubkey_bytes):
-        print(f"[UDP] Beacon from {addr[0]} FAILED signature — dropping")
+    if not _verify(signed_region, sig, pub_bytes):
+        print(f"[UDP] Beacon from {addr[0]} — bad signature, dropping")
         return
 
-    pub_hex = pubkey_bytes.hex()
+    pub_hex = pub_bytes.hex()
     with state.registry_lock:
         is_new = pub_hex not in state.registry
         state.registry[pub_hex] = {"ip": addr[0], "last_seen": time.time()}
 
     if is_new:
-        print(f"[UDP] ✓ Registered auditor {addr[0]}  pubkey={pub_hex[:12]}...")
-   # else:
-    #    print(f"[UDP] ↻ Refreshed auditor {addr[0]}  pubkey={pub_hex[:12]}...")
+        print(f"[UDP] ✓ Registered  {addr[0]}  pubkey={pub_hex[:12]}...")
+    else:
+        print(f"[UDP] ↻ Refreshed   {addr[0]}  pubkey={pub_hex[:12]}...")
 
 
 def _handle_bid(data: bytes, addr):
     if not state.collecting_bids:
         return
 
-    pubkey_bytes  = data[1:65]
-    sig           = data[65:129]
-    signed_region = data[0:65]
+    pub_bytes     = data[1:65]
+    price_bytes   = data[65:73]
+    sig           = data[73:137]
+    signed_region = data[0:73]   # sig covers type + pubkey + price
 
-    if not _verify(signed_region, sig, pubkey_bytes):
-        print(f"[UDP] Bid from {addr[0]} FAILED signature — dropping")
+    if not _verify(signed_region, sig, pub_bytes):
+        print(f"[UDP] Bid from {addr[0]} — bad signature, dropping")
         return
 
-    pub_hex = pubkey_bytes.hex()
+    pub_hex = pub_bytes.hex()
+    price   = struct.unpack('<d', price_bytes)[0]
 
-    # Only accept bids from registered auditors
+    # Must have registered via beacon first
     with state.registry_lock:
         if pub_hex not in state.registry:
-            print(f"[UDP] Bid from unknown pubkey {pub_hex[:12]}... — dropping")
+            print(f"[UDP] Bid from unregistered pubkey {pub_hex[:12]}... — dropping")
             return
 
     with state.bids_lock:
-        if any(b["pubkey_hex"] == pub_hex for b in state.bids):
-            return  # duplicate bid
-        state.bids.append({"pubkey_hex": pub_hex, "ip": addr[0]})
+        if pub_hex in state.bids:
+            return   # duplicate bid from same auditor
+        state.bids[pub_hex] = {"ip": addr[0], "price": price}
 
-    print(f"[UDP] ✓ Bid received from {addr[0]}  pubkey={pub_hex[:12]}...")
+    print(f"[UDP] ✓ Bid from {addr[0]}  pubkey={pub_hex[:12]}...  price={price:.4f} FLOW")
 
 
-# ── Flow quorum selection ─────────────────────────────────────────────────────
+# ── Flow stake/reputation query ───────────────────────────────────────────────
 
-def _query_flow_stake_reputation(pubkey_hex: str) -> tuple[float, float]:
+def _query_flow_stake_reputation(pubkey_hex: str) -> tuple:
     """
-    Query SwarmVerifierV2 on Flow testnet for a node's stake and reputation.
-    Returns (stake, reputation). Falls back to (0.0, 0.0) on any error.
-
-    Flow REST API: POST /v1/scripts with a Cadence script body.
-    The script returns a JSON-encoded struct; we extract stake and reputation.
+    Query SwarmVerifierV2 on Flow testnet for stake and reputation.
+    Returns (stake: float, reputation: float). Falls back to (0.0, 0.0) on error.
     """
     if not FLOW_ENABLED:
         return (0.0, 0.0)
 
     script = f"""
 import {FLOW_CONTRACT_NAME} from {FLOW_CONTRACT_ADDR}
-
 access(all) fun main(pubkey: String): [Fix64?] {{
     let stake = {FLOW_CONTRACT_NAME}.getStake(nodeId: pubkey)
     let rep   = {FLOW_CONTRACT_NAME}.getReputation(nodeId: pubkey)
@@ -484,7 +743,6 @@ access(all) fun main(pubkey: String): [Fix64?] {{
 }}
 """.strip()
 
-    import base64
     encoded_script = base64.b64encode(script.encode()).decode()
     encoded_arg    = base64.b64encode(
         json.dumps({"type": "String", "value": pubkey_hex}).encode()
@@ -499,99 +757,172 @@ access(all) fun main(pubkey: String): [Fix64?] {{
         if resp.status_code != 200:
             print(f"[Flow] Script query failed: {resp.status_code}")
             return (0.0, 0.0)
-
-        # Flow returns base64-encoded Cadence JSON
         result_bytes = base64.b64decode(resp.json().get("value", ""))
         result       = json.loads(result_bytes)
-
-        # result is an Array of two Optional Fix64 values
-        values = result.get("value", [])
-        stake  = float(values[0]["value"]["value"]) if values[0]["value"] else 0.0
-        rep    = float(values[1]["value"]["value"]) if values[1]["value"] else 0.0
+        values       = result.get("value", [])
+        stake = float(values[0]["value"]["value"]) if values[0]["value"] else 0.0
+        rep   = float(values[1]["value"]["value"]) if values[1]["value"] else 0.0
         return (stake, rep)
-
     except Exception as e:
         print(f"[Flow] Query error for {pubkey_hex[:12]}...: {e}")
         return (0.0, 0.0)
 
 
-def _select_quorum(bids: list[dict]) -> list[dict]:
-    """
-    Rank bidding auditors by Flow stake (primary) then reputation (secondary).
-    Returns top QUORUM_SIZE entries.
+# ── Quorum selection ──────────────────────────────────────────────────────────
 
-    If FLOW_ENABLED is False, falls back to accepting all bidders (local testing).
+def _select_quorum(bids: dict) -> dict:
     """
-    if not FLOW_ENABLED:
-        return bids  # no ranking in local test mode
+    Rank bidding auditors by weighted score:
+      score = W_PRICE*(1/price) + W_REP*reputation + W_STAKE*stake
 
-    print(f"[Quorum] Querying Flow for stake/reputation of {len(bids)} bidder(s)...")
-    ranked = []
-    for b in bids:
-        stake, rep = _query_flow_stake_reputation(b["pubkey_hex"])
-        if stake == 0.0:
-            print(f"[Quorum] {b['pubkey_hex'][:12]}... not registered on Flow — excluded")
+    When FLOW_ENABLED=False, stake and reputation are both 0.0 so ranking
+    is purely by bid price (cheapest wins).
+
+    Returns dict pubkey_hex → { ip, price, stake, reputation, score }
+    for the top QUORUM_SIZE bidders.
+    """
+    if not bids:
+        return {}
+
+    print(f"[Quorum] Scoring {len(bids)} bidder(s)...")
+    scored = []
+    for pub_hex, bid in bids.items():
+        stake, rep = _query_flow_stake_reputation(pub_hex)
+        price = bid["price"]
+        if price <= 0.0:
+            print(f"[Quorum]   {pub_hex[:12]}... price={price} — skipping (invalid price)")
             continue
-        ranked.append({**b, "stake": stake, "reputation": rep})
-        print(f"[Quorum]   {b['pubkey_hex'][:12]}...  stake={stake:.2f}  rep={rep:.4f}")
+        score = W_PRICE * (1.0 / price) + W_REP * rep + W_STAKE * stake
+        scored.append({
+            "pubkey_hex": pub_hex,
+            "ip":         bid["ip"],
+            "price":      price,
+            "stake":      stake,
+            "reputation": rep,
+            "score":      score,
+        })
+        print(f"[Quorum]   {pub_hex[:12]}...  price={price:.4f}  stake={stake:.2f}  "
+              f"rep={rep:.4f}  score={score:.4f}")
 
-    ranked.sort(key=lambda x: (x["stake"], x["reputation"]), reverse=True)
-    return ranked[:QUORUM_SIZE]
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    top = scored[:QUORUM_SIZE]
+    return {e["pubkey_hex"]: e["ip"] for e in top}
+
+
+# ── PKT_QUORUM sender ─────────────────────────────────────────────────────────
+
+def _send_quorum_notifications(quorum: dict):
+    """
+    Send PKT_QUORUM (0x04, 129 bytes) as a directed unicast to each selected auditor.
+    The auditor verifies the transporter's sig and confirms the nominated pubkey
+    is their own before proceeding to GET /data.
+
+    Uses a fresh UDP socket per notification to avoid port conflicts.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    for pub_hex, ip in quorum.items():
+        try:
+            pub_bytes = bytes.fromhex(pub_hex)
+        except ValueError:
+            print(f"[Quorum] Cannot decode pubkey for {ip} — skipping")
+            continue
+        packet = state.build_quorum_packet(pub_bytes)
+        sock.sendto(packet, (ip, MULTICAST_PORT))
+        print(f"[Quorum] Sent PKT_QUORUM → {ip}  pubkey={pub_hex[:12]}...")
+    sock.close()
 
 
 # ── Anomaly trigger ────────────────────────────────────────────────────────────
 
 def trigger_anomaly():
     """
-    Broadcasts a signed anomaly packet, waits BID_WINDOW_S for bids,
-    then selects the full quorum (all valid bidders for testing).
-    Arms the HTTP server and waits for verdicts.
+    Full anomaly event cycle:
+      1. Generate CSV + set confidence
+      2. Broadcast PKT_ANOMALY
+      3. Collect bids for BID_WINDOW_S
+      4. Score bids → select quorum
+      5. Compute submission_sig (event ID for Flow contract)
+      6. Send PKT_QUORUM to each selected auditor
+      7. Wait VERDICT_TIMEOUT_S for all verdicts
+      8. Force-finalize after timeout with whatever verdicts arrived
     """
-    # Generate fresh CSV for this anomaly event
+    # ── Prepare event data
     state.csv_data           = _generate_drop_csv()
     state.anomaly_confidence = round(float(np.random.uniform(0.87, 0.99)), 4)
-    state.bids.clear()
-    state.verdicts.clear()
-    state.collecting_bids    = True
 
+    try:
+        last_row = state.csv_data.strip().split("\n")[-1].split(",")
+        state.last_quat = {
+            "qw": float(last_row[4]), "qx": float(last_row[5]),
+            "qy": float(last_row[6]), "qz": float(last_row[7]),
+        }
+    except Exception:
+        pass
+
+    # Reset per-event state
+    with state.bids_lock:
+        state.bids.clear()
+    with state.verdicts_lock:
+        state.verdicts.clear()
+    with state.issued_payload_sigs_lock:
+        state.issued_payload_sigs.clear()
+    state.quorum.clear()
+    state.current_event_id = ""
+    state.collecting_bids  = True
+    state.system_status    = "ANOMALY"
+
+    # ── Broadcast PKT_ANOMALY
     packet = state.build_anomaly_packet()
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock   = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
     sock.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
-
-    print(f"\n[Anomaly] Broadcast 133-byte anomaly | confidence={state.anomaly_confidence:.4f}")
+    sock.close()
+    print(f"\n[Anomaly] Broadcast PKT_ANOMALY | confidence={state.anomaly_confidence:.4f}")
     print(f"[Anomaly] Collecting bids for {BID_WINDOW_S}s...")
 
+    # ── Collect bids
     time.sleep(BID_WINDOW_S)
     state.collecting_bids = False
 
     with state.bids_lock:
-        all_bids = list(state.bids)
+        all_bids = dict(state.bids)
 
     if not all_bids:
         print("[Anomaly] No bids received — returning to IDLE\n")
+        state.system_status = "IDLE"
         return
 
-    # Rank by Flow stake + reputation; falls back to all bidders if FLOW_ENABLED=False
-    quorum_list = _select_quorum(all_bids)
+    # ── Score bids and select quorum
+    quorum = _select_quorum(all_bids)
 
-    if not quorum_list:
-        print("[Anomaly] No eligible quorum members after Flow check — returning to IDLE\n")
+    if not quorum:
+        print("[Anomaly] No eligible quorum members — returning to IDLE\n")
+        state.system_status = "IDLE"
         return
 
-    state.quorum            = {b["pubkey_hex"] for b in quorum_list}
-    state.expected_verdicts = len(state.quorum)
+    state.quorum           = quorum
+    state.expected_verdicts = len(quorum)
 
-    src = "Flow-ranked" if FLOW_ENABLED else "local (Flow disabled)"
-    print(f"[Anomaly] Quorum selected ({src}): {len(state.quorum)} auditor(s)")
-    for b in quorum_list:
-        stake_str = f"  stake={b.get('stake', '?'):.2f}  rep={b.get('reputation', '?'):.4f}" if FLOW_ENABLED else ""
-        print(f"           {b['ip']}  pubkey={b['pubkey_hex'][:12]}...{stake_str}")
+    # ── Compute submission_sig (unique event ID, used as Flow contract key)
+    state.current_event_id = state.build_submission_sig(list(quorum.keys()))
 
+    src = "Flow-ranked" if FLOW_ENABLED else "local (bid price only)"
+    print(f"[Anomaly] Quorum ({src}): {len(quorum)} auditor(s)")
+    for pub_hex, ip in quorum.items():
+        bid   = all_bids.get(pub_hex, {})
+        print(f"           {ip}  pubkey={pub_hex[:12]}...  price={bid.get('price', '?'):.4f} FLOW")
+    print(f"[Anomaly] event_id={state.current_event_id[:24]}...")
+
+    # ── Phase 1: register anomaly on Flow (simulated)
+    _register_anomaly_on_flow(quorum)
+
+    # ── Send PKT_QUORUM to each selected auditor
+    _send_quorum_notifications(quorum)
+
+    state.system_status = "DELIVERING"
     print(f"[Anomaly] HTTP server armed. Waiting up to {VERDICT_TIMEOUT_S}s for verdicts...")
 
-    # Wait for all verdicts or timeout
+    # ── Wait for all verdicts or timeout
     deadline = time.time() + VERDICT_TIMEOUT_S
     while time.time() < deadline:
         with state.verdicts_lock:
@@ -601,17 +932,31 @@ def trigger_anomaly():
     else:
         with state.verdicts_lock:
             received = len(state.verdicts)
-        print(f"[Anomaly] Verdict timeout — got {received}/{state.expected_verdicts}")
-        if received > 0:
-            _run_consensus()
+        print(f"[Anomaly] Verdict timeout — {received}/{state.expected_verdicts} received")
 
-    # Reset for next event — clear nonces too so stale HTTP requests from this
-    # cycle cannot be replayed into the next one.
+    _finalize_event()
+
+    # ── Reset HTTP state (nonces, quorum) for next cycle
     state.quorum.clear()
     with state.nonces_lock:
         state.nonces.clear()
-    state.collecting_verdicts = False
-    print("[Anomaly] Returning to IDLE\n")
+    print("[Anomaly] Cycle complete, returning to IDLE\n")
+
+
+def _register_anomaly_on_flow(quorum: dict):
+    """
+    Simulates calling SwarmVerifierV2.registerAnomaly() via the Gateway resource.
+    In production this is an authenticated Flow transaction from the deployer account.
+    Prints what would be submitted.
+    """
+    if FLOW_ENABLED:
+        print("[Flow] registerAnomaly — live submission not yet wired (set FLOW_ENABLED=False)")
+        return
+
+    print(f"[Flow] (simulated) registerAnomaly("
+          f"event_id={state.current_event_id[:16]}...  "
+          f"quorum={len(quorum)}  "
+          f"conf={state.anomaly_confidence:.4f})")
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -630,7 +975,9 @@ def cli():
             with state.registry_lock:
                 n = len(state.registry)
             if n == 0:
-                print("[!] No auditors registered yet. Wait for beacon(s).")
+                print("[!] No auditors registered yet. Wait for a beacon.")
+            elif state.system_status != "IDLE":
+                print(f"[!] Busy ({state.system_status}) — wait for current cycle to finish.")
             else:
                 threading.Thread(target=trigger_anomaly, daemon=True).start()
 
@@ -653,13 +1000,11 @@ def cli():
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Separate threads for multicast beacons and unicast bids
     threading.Thread(target=multicast_listener, daemon=True).start()
     threading.Thread(target=bid_listener,       daemon=True).start()
 
-    # HTTP server thread
     server = HTTPServer(("0.0.0.0", HTTP_PORT), TransporterHTTP)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"[HTTP] Server listening on 0.0.0.0:{HTTP_PORT}")
+    print(f"[HTTP] Server on 0.0.0.0:{HTTP_PORT}")
 
     cli()
