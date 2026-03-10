@@ -12,10 +12,10 @@ Implements the full protocol:
   HTTP (simulates both Pico endpoints and the Flow contract in dev mode):
     GET  /data?pubkey=<hex>  → 402 + nonce
     POST /pay               → 200 with { csv, payload }
-    POST /verdict           → simulates Flow contract submitVerdict()
+    POST /verdict           → simulates SwarmVerifierV3.submitVerdict()
     GET  /state             → dashboard snapshot
 
-Three-phase settlement (mirrors SwarmVerifierV2.cdc):
+Three-phase settlement (mirrors SwarmVerifierV3.cdc):
   Phase 1 — registerAnomaly: after quorum selected, submission_sig computed,
              escrow locked (simulated), event registered in pending_events.
   Phase 2 — submitVerdict:  each auditor posts to /verdict independently.
@@ -27,22 +27,52 @@ Three-phase settlement (mirrors SwarmVerifierV2.cdc):
 
 Bid packet: 137 bytes
   [0x02 | pubkey 64B | price float64 LE 8B | sig over bytes 0-72, 64B]
+
+Payload object in 200 /pay response (must match what auditor.py expects):
+  {
+    transporter_pubkey,   auditor_pubkey,
+    anomaly_confidence,   timestamp_ms,
+    submission_sig,       ← eventId the contract uses (auditor reads this key)
+    payload_signature,    ← per-auditor sig tying verdict to this event
+  }
+
+Verdict body POSTed by auditor.py (must match what _handle_verdict reads):
+  {
+    event_id,             ← submission_sig, the contract's event key
+    auditor_pubkey,       ← 128 hex chars
+    verdict,              ← bool
+    verdict_confidence,   ← float 0.0–1.0
+    payload_signature,    ← hex sig the transporter issued in the 200 response
+    verdict_signature,    ← auditor's ECDSA sig over canonical string
+    csv_cid,              ← always "" from auditors
+  }
 """
 
+import asyncio
 import base64
 import hashlib
 import json
+import os
 import secrets
 import socket
 import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import requests
+from dotenv import load_dotenv
 from ecdsa import NIST256p, BadSignatureError, SigningKey, VerifyingKey
+from ecdsa.util import sigencode_string
+from flow_py_sdk import flow_client
+from flow_py_sdk.cadence import String, UFix64, Array, Address
+from flow_py_sdk.signer import Signer as FlowSigner
+from flow_py_sdk.tx import Tx, ProposalKey
+
+load_dotenv()
 
 # ── Protocol constants (must match config.h and auditor.py) ──────────────────
 MULTICAST_GROUP    = "239.0.0.1"
@@ -54,7 +84,7 @@ CSV_BUFFER_SAMPLES = 75
 WINDOW_SIZE        = 50
 
 BID_WINDOW_S      = 0.6    # collect bids before selecting quorum
-VERDICT_TIMEOUT_S = 30.0   # wait for all quorum verdicts before force-finalizing
+VERDICT_TIMEOUT_S = 75.0   # wait for all quorum verdicts before force-finalizing
 
 # Quorum scoring weights (must match QUORUM_W_* build flags in config.h)
 W_PRICE = 0.5
@@ -62,7 +92,7 @@ W_REP   = 0.3
 W_STAKE = 0.2
 QUORUM_SIZE = 3
 
-# Reputation formula constants (must match SwarmVerifierV2.cdc)
+# Reputation formula constants (must match SwarmVerifierV3.cdc)
 ALPHA = 10.0
 BETA  = 5.0
 
@@ -70,12 +100,17 @@ BETA  = 5.0
 ANOMALY_THRESHOLD = 0.85
 
 # ── Flow testnet config ───────────────────────────────────────────────────────
-# Set FLOW_ENABLED = True once SwarmVerifierV2 is deployed to testnet.
+# Set FLOW_ENABLED = True once SwarmVerifierV3 is deployed to testnet.
 # When False: quorum scoring uses local bid prices only (no stake/rep lookup).
-FLOW_ENABLED       = False
+FLOW_ENABLED       = True
 FLOW_REST_URL      = "https://rest-testnet.onflow.org/v1/scripts"
-FLOW_CONTRACT_ADDR = "0xYOUR_TESTNET_ADDRESS"
-FLOW_CONTRACT_NAME = "SwarmVerifierV2"
+FLOW_CONTRACT_ADDR = "0xfcd23c8d1553708a"
+FLOW_CONTRACT_NAME = "SwarmVerifierV3"
+FLOW_GRPC_HOST     = "access.devnet.nodes.onflow.org"
+FLOW_GRPC_PORT     = 9000
+
+# Payment offered to each aligned auditor per event (UFix64, in FLOW)
+PAYMENT_PER_AUDITOR = 0.1   # 0.1 FLOW = 10_000_000 in UFix64 fixed-point
 
 
 # ── Crypto helpers ────────────────────────────────────────────────────────────
@@ -90,6 +125,139 @@ def _verify(payload: bytes, sig: bytes, pubkey_bytes: bytes) -> bool:
         return True
     except (BadSignatureError, Exception):
         return False
+
+
+# ── Flow signer (SHA3-256 + raw r‖s, domain-tagged per Flow protocol) ─────────
+
+class _EcdsaSigner(FlowSigner):
+    def __init__(self, sk: SigningKey):
+        self._sk = sk
+
+    def sign(self, message: bytes, tag: Optional[bytes] = None) -> bytes:
+        if tag is not None:
+            message = tag + message
+        return self._sk.sign(message, hashfunc=hashlib.sha3_256, sigencode=sigencode_string)
+
+
+# ── Cadence transaction scripts ────────────────────────────────────────────────
+
+_REGISTER_NODE_SCRIPT = """
+import {name} from {addr}
+transaction(nodeId: String, stake: UFix64) {{
+    prepare(signer: &Account) {{}}
+    execute {{
+        {name}.registerNode(nodeId: nodeId, stake: stake)
+    }}
+}}
+"""
+
+_REGISTER_ANOMALY_SCRIPT = """
+import {name} from {addr}
+transaction(
+    transporterId:     String,
+    submissionSig:     String,
+    anomalyConfidence: UFix64,
+    quorumIds:         [String],
+    paymentPerAuditor: UFix64
+) {{
+    let gateway: &{name}.Gateway
+    prepare(signer: auth(BorrowValue) &Account) {{
+        self.gateway = signer.storage.borrow<&{name}.Gateway>(
+            from: {name}.GatewayStoragePath
+        ) ?? panic("Gateway resource not found — is this the deployer account?")
+    }}
+    execute {{
+        self.gateway.registerAnomaly(
+            transporterId:     transporterId,
+            submissionSig:     submissionSig,
+            anomalyConfidence: anomalyConfidence,
+            quorumIds:         quorumIds,
+            paymentPerAuditor: paymentPerAuditor
+        )
+    }}
+}}
+"""
+
+_FINALIZE_EVENT_SCRIPT = """
+import {name} from {addr}
+transaction(eventId: String) {{
+    prepare(signer: &Account) {{}}
+    execute {{
+        {name}.finalizeEvent(eventId: eventId)
+    }}
+}}
+"""
+
+_UPDATE_CID_SCRIPT = """
+import {name} from {addr}
+transaction(eventId: String, cid: String) {{
+    let gateway: &{name}.Gateway
+    prepare(signer: auth(BorrowValue) &Account) {{
+        self.gateway = signer.storage.borrow<&{name}.Gateway>(
+            from: {name}.GatewayStoragePath
+        ) ?? panic("Gateway resource not found — is this the deployer account?")
+    }}
+    execute {{
+        self.gateway.updateEventCid(eventId: eventId, cid: cid)
+    }}
+}}
+"""
+
+def _cadence_script(template: str) -> str:
+    return template.format(name=FLOW_CONTRACT_NAME, addr=FLOW_CONTRACT_ADDR)
+
+
+# ── Shared async Flow transaction helper ──────────────────────────────────────
+
+async def _submit_flow_tx_async(script: str, *args) -> str:
+    """
+    Build, sign, and submit a Flow transaction. Returns the sealed TX ID hex.
+    Reads FLOW_ACCOUNT_ADDR and FLOW_ACCOUNT_KEY from env.
+    """
+    flow_addr_raw = os.environ.get("FLOW_ACCOUNT_ADDR", "").removeprefix("0x")
+    flow_key_raw  = os.environ.get("FLOW_ACCOUNT_KEY",  "").removeprefix("0x")
+
+    if not flow_addr_raw or not flow_key_raw:
+        raise RuntimeError("FLOW_ACCOUNT_ADDR / FLOW_ACCOUNT_KEY env vars not set")
+
+    sk     = SigningKey.from_string(bytes.fromhex(flow_key_raw), curve=NIST256p)
+    signer = _EcdsaSigner(sk)
+    addr   = Address.from_hex(flow_addr_raw)
+
+    async with flow_client(host=FLOW_GRPC_HOST, port=FLOW_GRPC_PORT) as client:
+        account      = await client.get_account(address=addr)
+        account_key  = account.keys[0]
+        latest_block = await client.get_latest_block(is_sealed=True)
+
+        tx = (
+            Tx(code=script)
+            .with_reference_block_id(latest_block.id)
+            .with_gas_limit(999)
+            .with_proposal_key(ProposalKey(
+                key_address         = addr,
+                key_id              = account_key.index,
+                key_sequence_number = account_key.sequence_number,
+            ))
+            .with_payer(addr)
+            .add_authorizers(addr)
+            .with_envelope_signature(addr, account_key.index, signer)
+        )
+        for arg in args:
+            tx.add_arguments(arg)
+
+        result = await client.execute_transaction(tx, wait_for_seal=True, timeout=60.0)
+        return result.id.hex()
+
+
+def _submit_flow_tx(label: str, script: str, *args) -> str:
+    """Sync wrapper around _submit_flow_tx_async. Returns TX ID or "" on error."""
+    try:
+        tx_id = asyncio.run(_submit_flow_tx_async(script, *args))
+        print(f"[Flow] ✓ {label} sealed — https://testnet.flowscan.io/tx/{tx_id}")
+        return tx_id
+    except Exception as e:
+        print(f"[Flow] ✗ {label} failed: {e}")
+        return ""
 
 
 # ── Mock IMU data generator ───────────────────────────────────────────────────
@@ -138,7 +306,7 @@ class TransporterState:
         self.registry_lock = threading.Lock()
 
         # Bid collection: pubkey_hex → { ip, price }
-        self.bids          = {}   # dict keyed by pubkey_hex to prevent duplicates
+        self.bids          = {}
         self.bids_lock     = threading.Lock()
         self.collecting_bids = False
 
@@ -155,7 +323,12 @@ class TransporterState:
         self.issued_payload_sigs_lock = threading.Lock()
 
         # Current event
-        self.current_event_id:   str   = ""   # submission_sig — unique per event
+        # submission_sig is the unique event key used by the Flow contract
+        # (submissionSig in registerAnomaly / anomalyLedger).
+        # It is the ECDSA sig over the canonical payload — computed after quorum
+        # selection and stored here so we can serve it in the /pay payload and
+        # validate it in /verdict bodies from auditors.
+        self.current_event_id:   str   = ""   # submission_sig hex
         self.anomaly_confidence: float = 0.93
         self.csv_data:           str   = ""
 
@@ -201,17 +374,18 @@ class TransporterState:
           1. Sig is valid using the transporter pubkey (known from PKT_ANOMALY)
           2. bytes 1-64 == own pubkey
         """
-        header  = struct.pack('<B', 0x04) + auditor_pubkey_bytes   # 65 bytes
-        sig     = _sign(self.sk, header)
-        packet  = header + sig
+        header = struct.pack('<B', 0x04) + auditor_pubkey_bytes   # 65 bytes
+        sig    = _sign(self.sk, header)
+        packet = header + sig
         assert len(packet) == 129
         return packet
 
     def build_submission_sig(self, quorum_ids: list) -> str:
         """
         Computes the submission_sig that acts as the unique event ID on the
-        Flow contract. Signs: transporter_pubkey + anomaly_confidence + timestamp
-        + all quorum pubkeys. This is the 'submissionSig' field in registerAnomaly.
+        Flow contract (the 'submissionSig' / eventId in registerAnomaly and
+        anomalyLedger). Signs: transporter_pubkey + anomaly_confidence +
+        timestamp + sorted quorum pubkeys.
         """
         canonical = json.dumps({
             "transporter_pubkey": self.pub_hex,
@@ -223,17 +397,22 @@ class TransporterState:
 
     def build_payload_json(self, auditor_pubkey_hex: str) -> dict:
         """
-        Signed payload served inside the x402 200 response.
+        Signed payload object inside the x402 200 response.
+
+        Key names MUST match what auditor._execute_x402_fetch() reads:
+          payload.get("submission_sig")   ← stored as _current_event_id
+          payload.get("payload_signature") ← carried into _submit_verdict
+
         payload_signature is per-auditor — it ties the auditor's verdict to
-        the specific data they received. The auditor must include this in their
-        verdict body so the contract can verify the chain of custody.
+        the specific data they received. The auditor includes this in their
+        verdict body so the contract can verify chain of custody.
         """
         body = {
             "transporter_pubkey":  self.pub_hex,
             "auditor_pubkey":      auditor_pubkey_hex,
             "anomaly_confidence":  self.anomaly_confidence,
             "timestamp_ms":        int(time.time() * 1000),
-            "event_id":            self.current_event_id,
+            "submission_sig":      self.current_event_id,   # ← auditor reads this key
         }
         canonical = json.dumps(body, separators=(',', ':')).encode()
         sig_hex   = _sign(self.sk, canonical).hex()
@@ -301,7 +480,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         if self.path == "/pay":
             self._handle_pay(body)
         elif self.path == "/verdict":
-            # Simulates SwarmVerifierV2.submitVerdict() in dev mode.
+            # Simulates SwarmVerifierV3.submitVerdict() in dev mode.
             # When FLOW_ENABLED=True, auditors post directly to the contract
             # and this endpoint is unused.
             self._handle_verdict(body)
@@ -425,22 +604,24 @@ class TransporterHTTP(BaseHTTPRequestHandler):
             "payload": payload,
         })
 
-    # ── POST /verdict  (simulates SwarmVerifierV2.submitVerdict) ─────────────
+    # ── POST /verdict  (simulates SwarmVerifierV3.submitVerdict) ─────────────
 
     def _handle_verdict(self, body: dict):
         """
         Simulates the Flow contract's submitVerdict() function.
 
         Expected fields (must match auditor._submit_verdict body):
+          event_id            — submission_sig hex (the contract's event key)
           auditor_pubkey      — 128 hex chars
           verdict             — bool
           verdict_confidence  — float 0.0–1.0
           payload_signature   — hex sig the transporter issued in the 200 response
           verdict_signature   — auditor's ECDSA sig over canonical string
-          csv_cid             — always "" from auditors (Storacha upload is transporter's job)
+          csv_cid             — always "" from auditors
         """
         client_ip = self.client_address[0]
 
+        event_id          = body.get("event_id",           "")
         auditor_pub       = body.get("auditor_pubkey",     "")
         verdict           = body.get("verdict")
         confidence        = body.get("verdict_confidence")
@@ -450,6 +631,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
 
         # ── Field presence check
         missing = [f for f, v in [
+            ("event_id",          event_id),
             ("auditor_pubkey",    auditor_pub),
             ("verdict",          verdict),
             ("verdict_confidence", confidence),
@@ -458,6 +640,13 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         ] if v is None or v == ""]
         if missing:
             self._send_json(400, {"error": f"missing fields: {missing}"})
+            return
+
+        # ── event_id must match the current active event
+        if event_id != state.current_event_id:
+            print(f"[Verdict] {client_ip} event_id mismatch: got {event_id[:16]}... "
+                  f"expected {state.current_event_id[:16]}...")
+            self._send_json(409, {"error": "event_id does not match active event"})
             return
 
         # ── Quorum membership
@@ -482,6 +671,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
 
         # ── Verify verdict signature
         # Canonical: "<128-hex-pubkey>:<0 or 1>:<confidence:.4f>"
+        # int() cast is mandatory — bool True → 'True', int(True) → '1'
         canonical = f"{auditor_pub}:{int(verdict)}:{float(confidence):.4f}".encode()
         try:
             pub_bytes = bytes.fromhex(auditor_pub)
@@ -497,11 +687,12 @@ class TransporterHTTP(BaseHTTPRequestHandler):
 
         with state.verdicts_lock:
             state.verdicts[auditor_pub] = {
-                "verdict":          bool(verdict),
-                "confidence":       float(confidence),
+                "verdict":           bool(verdict),
+                "confidence":        float(confidence),
                 "payload_signature": payload_sig_hex,
                 "verdict_signature": verdict_sig_hex,
-                "ip":               client_ip,
+                "csv_cid":           csv_cid,
+                "ip":                client_ip,
             }
             count = len(state.verdicts)
 
@@ -514,7 +705,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
             threading.Thread(target=_finalize_event, daemon=True).start()
 
 
-# ── Consensus / finalization  (mirrors SwarmVerifierV2.finalizeEvent) ────────
+# ── Consensus / finalization  (mirrors SwarmVerifierV3.finalizeEvent) ─────────
 
 def _finalize_event():
     """
@@ -523,7 +714,8 @@ def _finalize_event():
 
     Silent auditors (in quorum but no verdict received) are treated as
     verdict=False, confidence=0.0 — identical penalty to wrong verdict.
-    This closes the free-rider attack described in the architecture doc.
+    This closes the free-rider attack: an auditor cannot observe others'
+    verdicts and submit last to guarantee alignment. Silence = wrong answer.
     """
     with state.verdicts_lock:
         received = dict(state.verdicts)
@@ -549,9 +741,9 @@ def _finalize_event():
             }
 
     # ── Cswarm and majority vote ──────────────────────────────────────────────
-    confidences = [v["confidence"] for v in all_verdicts.values()]
-    drop_votes  = sum(1 for v in all_verdicts.values() if v["verdict"])
-    cswarm      = sum(confidences) / n
+    confidences       = [v["confidence"] for v in all_verdicts.values()]
+    drop_votes        = sum(1 for v in all_verdicts.values() if v["verdict"])
+    cswarm            = sum(confidences) / n
     consensus_verdict = drop_votes > (n // 2)
 
     # ── Per-auditor reputation delta and alignment ────────────────────────────
@@ -601,32 +793,21 @@ def _finalize_event():
               f"ΔR={r['delta']:+.4f}  {status}")
     print("═" * 64)
 
-    # ── Simulate post-consensus Storacha upload ───────────────────────────────
-    # In production: transporter receives AnomalySettled event from Flow,
-    # then uploads the full bundle (CSV + all verdicts + consensus result +
-    # all signatures) to Storacha and calls updateEventCid on the contract.
-    # Here we just generate a plausible-looking fake CID.
-    print("[Storacha] Simulating post-consensus bundle upload...")
-    time.sleep(0.3)   # simulate upload latency
-    cid      = "bafyrei" + secrets.token_hex(16)
-    flow_tx  = "0x"   + secrets.token_hex(8)
-    print(f"[Storacha] CID={cid}")
-    print(f"[Flow]     updateEventCid → tx={flow_tx}")
-    print("═" * 64 + "\n")
+    
 
-    # ── Store finalized event for /state dashboard ────────────────────────────
+    # ── Store finalized event for /state dashboard (mock mode only) ───────────
     event = {
-        "event_id":           state.current_event_id,
-        "timestamp":          time.time(),
-        "anomaly_confidence": state.anomaly_confidence,
-        "cswarm":             round(cswarm, 4),
-        "consensus_verdict":  consensus_verdict,
-        "drop_votes":         drop_votes,
-        "total_auditors":     n,
+        "event_id":            state.current_event_id,
+        "timestamp":           time.time(),
+        "anomaly_confidence":  state.anomaly_confidence,
+        "cswarm":              round(cswarm, 4),
+        "consensus_verdict":   consensus_verdict,
+        "drop_votes":          drop_votes,
+        "total_auditors":      n,
         "transporter_slashed": transporter_slashed,
-        "auditor_results":    auditor_results,
-        "storacha_cid":       cid,
-        "flow_tx":            flow_tx,
+        "auditor_results":     auditor_results,
+        "storacha_cid":        "",   # set later by updateEventCid in mock mode
+        "flow_tx":             "",
     }
     with state.events_lock:
         state.settled_events.insert(0, event)
@@ -727,10 +908,6 @@ def _handle_bid(data: bytes, addr):
 # ── Flow stake/reputation query ───────────────────────────────────────────────
 
 def _query_flow_stake_reputation(pubkey_hex: str) -> tuple:
-    """
-    Query SwarmVerifierV2 on Flow testnet for stake and reputation.
-    Returns (stake: float, reputation: float). Falls back to (0.0, 0.0) on error.
-    """
     if not FLOW_ENABLED:
         return (0.0, 0.0)
 
@@ -757,11 +934,24 @@ access(all) fun main(pubkey: String): [Fix64?] {{
         if resp.status_code != 200:
             print(f"[Flow] Script query failed: {resp.status_code}")
             return (0.0, 0.0)
-        result_bytes = base64.b64decode(resp.json().get("value", ""))
-        result       = json.loads(result_bytes)
-        values       = result.get("value", [])
-        stake = float(values[0]["value"]["value"]) if values[0]["value"] else 0.0
-        rep   = float(values[1]["value"]["value"]) if values[1]["value"] else 0.0
+
+        # REST API returns {"value": "<base64>"} where the decoded value is
+        # a JSON-Cadence object like {"type":"Array","value":[...]}
+        raw_response     = resp.json()
+        raw_b64 = raw_response if isinstance(raw_response, str) else raw_response.get("value", "")
+        decoded = json.loads(base64.b64decode(raw_b64))   # outer decode
+        values  = decoded["value"]   # list of JSON-Cadence Fix64? elements
+
+        def _extract(item):
+            # Optional(Fix64) → {"type":"Optional","value":{"type":"Fix64","value":"10.00"}}
+            # nil Optional  → {"type":"Optional","value":null}
+            inner = item.get("value")
+            if inner is None:
+                return 0.0
+            return float(inner.get("value", 0.0))
+
+        stake = _extract(values[0])
+        rep   = _extract(values[1])
         return (stake, rep)
     except Exception as e:
         print(f"[Flow] Query error for {pubkey_hex[:12]}...: {e}")
@@ -816,8 +1006,6 @@ def _send_quorum_notifications(quorum: dict):
     Send PKT_QUORUM (0x04, 129 bytes) as a directed unicast to each selected auditor.
     The auditor verifies the transporter's sig and confirms the nominated pubkey
     is their own before proceeding to GET /data.
-
-    Uses a fresh UDP socket per notification to avoid port conflicts.
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     for pub_hex, ip in quorum.items():
@@ -842,9 +1030,11 @@ def trigger_anomaly():
       3. Collect bids for BID_WINDOW_S
       4. Score bids → select quorum
       5. Compute submission_sig (event ID for Flow contract)
-      6. Send PKT_QUORUM to each selected auditor
-      7. Wait VERDICT_TIMEOUT_S for all verdicts
-      8. Force-finalize after timeout with whatever verdicts arrived
+      6. Phase 1: registerAnomaly (simulated)
+      7. Send PKT_QUORUM to each selected auditor
+      8. Arm HTTP server for x402 delivery
+      9. Wait VERDICT_TIMEOUT_S for all verdicts
+     10. Force-finalize after timeout with whatever verdicts arrived
     """
     # ── Prepare event data
     state.csv_data           = _generate_drop_csv()
@@ -900,21 +1090,30 @@ def trigger_anomaly():
         state.system_status = "IDLE"
         return
 
-    state.quorum           = quorum
+    state.quorum            = quorum
     state.expected_verdicts = len(quorum)
 
-    # ── Compute submission_sig (unique event ID, used as Flow contract key)
+    # ── Compute submission_sig — the unique event ID for the Flow contract.
+    # This is built from the transporter pubkey, confidence, timestamp, and
+    # sorted quorum pubkeys, then ECDSA-signed. The contract stores all events
+    # under this key in anomalyLedger and pendingEvents.
     state.current_event_id = state.build_submission_sig(list(quorum.keys()))
 
     src = "Flow-ranked" if FLOW_ENABLED else "local (bid price only)"
     print(f"[Anomaly] Quorum ({src}): {len(quorum)} auditor(s)")
     for pub_hex, ip in quorum.items():
-        bid   = all_bids.get(pub_hex, {})
+        bid = all_bids.get(pub_hex, {})
         print(f"           {ip}  pubkey={pub_hex[:12]}...  price={bid.get('price', '?'):.4f} FLOW")
-    print(f"[Anomaly] event_id={state.current_event_id[:24]}...")
+    print(f"[Anomaly] submission_sig (event_id)={state.current_event_id[:24]}...")
 
-    # ── Phase 1: register anomaly on Flow (simulated)
-    _register_anomaly_on_flow(quorum)
+    # ── Phase 1: registerAnomaly on Flow — MUST complete before PKT_QUORUM ──
+    # The contract must have a pendingEvent record before auditors submit
+    # verdicts. If this fails, abort — auditor calls will be rejected on-chain.
+    ok = _register_anomaly_on_flow(quorum)
+    if FLOW_ENABLED and not ok:
+        print("[Anomaly] registerAnomaly failed — aborting cycle\n")
+        state.system_status = "IDLE"
+        return
 
     # ── Send PKT_QUORUM to each selected auditor
     _send_quorum_notifications(quorum)
@@ -922,41 +1121,134 @@ def trigger_anomaly():
     state.system_status = "DELIVERING"
     print(f"[Anomaly] HTTP server armed. Waiting up to {VERDICT_TIMEOUT_S}s for verdicts...")
 
-    # ── Wait for all verdicts or timeout
-    deadline = time.time() + VERDICT_TIMEOUT_S
-    while time.time() < deadline:
-        with state.verdicts_lock:
-            if len(state.verdicts) >= state.expected_verdicts:
-                break
-        time.sleep(0.5)
+    if FLOW_ENABLED:
+        # Poll until the contract's timeout has elapsed, then finalize.
+        # verdictTimeoutSecs in SwarmVerifierV3.cdc is 60.0 — we must wait
+        # at least that long before finalizeEvent will be accepted.
+        print(f"[Anomaly] Waiting {VERDICT_TIMEOUT_S}s for auditors to seal verdicts...")
+        deadline = time.time() + VERDICT_TIMEOUT_S
+        while time.time() < deadline:
+            time.sleep(5)
+            remaining = int(deadline - time.time())
+            if remaining > 0:
+                print(f"[Anomaly] {remaining}s remaining in verdict window...")
+
+        event_id = state.current_event_id
+        print(f"[Anomaly] Verdict window elapsed — calling finalizeEvent on-chain")
+        _finalize_event_on_flow(event_id)
+
+        print("[Storacha] Simulating post-consensus bundle upload...")
+        time.sleep(0.3)
+        cid = "bafyrei" + secrets.token_hex(16)
+        print(f"[Storacha] CID={cid}")
+        _update_event_cid_on_flow(event_id, cid)
+
     else:
-        with state.verdicts_lock:
-            received = len(state.verdicts)
-        print(f"[Anomaly] Verdict timeout — {received}/{state.expected_verdicts} received")
+        # Mock mode — auditors POST to /verdict, local state.verdicts is populated
+        deadline = time.time() + VERDICT_TIMEOUT_S
+        while time.time() < deadline:
+            with state.verdicts_lock:
+                if len(state.verdicts) >= state.expected_verdicts:
+                    break
+            time.sleep(0.5)
+        else:
+            with state.verdicts_lock:
+                received = len(state.verdicts)
+            print(f"[Anomaly] Verdict timeout — {received}/{state.expected_verdicts} received")
+        _finalize_event()
 
-    _finalize_event()
-
-    # ── Reset HTTP state (nonces, quorum) for next cycle
+    # ── Reset HTTP state for next cycle
     state.quorum.clear()
     with state.nonces_lock:
         state.nonces.clear()
     print("[Anomaly] Cycle complete, returning to IDLE\n")
 
 
+def _ensure_transporter_registered():
+    tx_id = _submit_flow_tx(
+        "registerNode",
+        _cadence_script(_REGISTER_NODE_SCRIPT),
+        String(state.pub_hex),
+        UFix64(int(10.0 * 1e8)),
+    )
+    if not tx_id:
+        print("[Flow] registerNode skipped (already registered or failed — continuing)")
+
+
 def _register_anomaly_on_flow(quorum: dict):
     """
-    Simulates calling SwarmVerifierV2.registerAnomaly() via the Gateway resource.
-    In production this is an authenticated Flow transaction from the deployer account.
-    Prints what would be submitted.
+    Phase 1: calls SwarmVerifierV3.registerAnomaly() via the Gateway resource.
+    Must complete before PKT_QUORUM is sent — the contract must have a
+    pendingEvent record before auditors can call submitVerdict().
+
+    Blocks until the transaction is sealed (or fails). If it fails, the caller
+    should abort the event cycle — auditor verdicts will be rejected by the
+    contract with "Event not found".
     """
-    if FLOW_ENABLED:
-        print("[Flow] registerAnomaly — live submission not yet wired (set FLOW_ENABLED=False)")
+    if not FLOW_ENABLED:
+        print(f"[Flow] (simulated) registerAnomaly  "
+              f"submission_sig={state.current_event_id[:16]}...  "
+              f"quorum={len(quorum)}  conf={state.anomaly_confidence:.4f}")
         return
 
-    print(f"[Flow] (simulated) registerAnomaly("
+    _ensure_transporter_registered()
+
+    conf_ufix    = int(state.anomaly_confidence * 1e8)
+    payment_ufix = int(PAYMENT_PER_AUDITOR * 1e8)
+    quorum_ids   = [String(pub) for pub in quorum.keys()]
+
+    print(f"[Flow] Submitting registerAnomaly  "
           f"event_id={state.current_event_id[:16]}...  "
-          f"quorum={len(quorum)}  "
-          f"conf={state.anomaly_confidence:.4f})")
+          f"quorum={len(quorum)}  conf={state.anomaly_confidence:.4f}")
+
+    tx_id = _submit_flow_tx(
+        "registerAnomaly",
+        _cadence_script(_REGISTER_ANOMALY_SCRIPT),
+        String(state.pub_hex),
+        String(state.current_event_id),
+        UFix64(conf_ufix),
+        Array(quorum_ids),
+        UFix64(payment_ufix),
+    )
+    return tx_id != ""
+
+
+def _finalize_event_on_flow(event_id: str):
+    """
+    Phase 3: calls SwarmVerifierV3.finalizeEvent() — open to anyone.
+    Triggered after all verdicts are received or VERDICT_TIMEOUT_S elapses.
+    The contract computes Cswarm, consensus, reputation deltas, and escrow
+    disbursement on-chain and emits AnomalySettled.
+    """
+    if not FLOW_ENABLED:
+        print(f"[Flow] (simulated) finalizeEvent  event_id={event_id[:16]}...")
+        return
+
+    print(f"[Flow] Submitting finalizeEvent  event_id={event_id[:16]}...")
+    _submit_flow_tx(
+        "finalizeEvent",
+        _cadence_script(_FINALIZE_EVENT_SCRIPT),
+        String(event_id),
+    )
+
+
+def _update_event_cid_on_flow(event_id: str, cid: str):
+    """
+    Post-consensus: calls SwarmVerifierV3.updateEventCid() via the Gateway.
+    Called after the Storacha upload completes. Sets the storachaCid field
+    on the AnomalyEvent — the only mutable field on a finalized event.
+    """
+    if not FLOW_ENABLED:
+        print(f"[Flow] (simulated) updateEventCid  event_id={event_id[:16]}...  cid={cid}")
+        return
+
+    print(f"[Flow] Submitting updateEventCid  event_id={event_id[:16]}...  cid={cid}")
+    _submit_flow_tx(
+        "updateEventCid",
+        _cadence_script(_UPDATE_CID_SCRIPT),
+        String(event_id),
+        String(cid),
+    )
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

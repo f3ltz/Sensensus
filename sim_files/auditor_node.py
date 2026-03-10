@@ -6,7 +6,7 @@ Flow:
   1. Broadcast signed beacon every 5 s (PKT_BEACON 0x01, 129 bytes)
   2. Receive PKT_ANOMALY (0x03, 133 bytes)
        → Verify transporter signature
-       → Store transporter pubkey + IP
+       → Store transporter pubkey + IP + eventId (submissionSig hex)
        → Send signed bid (PKT_BID 0x02, 137 bytes) to BID_PORT
   3. Wait for PKT_QUORUM (0x04, 129 bytes) directed unicast on MULTICAST_PORT
        → Verify sig with stored transporter pubkey
@@ -34,9 +34,14 @@ Verdict canonical string (signed by auditor):
   "<128-hex-pubkey>:<0 or 1>:<confidence:.4f>"
   e.g. "abcd1234...ef01:1:0.9412"
   int() cast on verdict is mandatory — Python bool serialises as 'True', not '1'.
+
+Environment variables for live Flow submission:
+  FLOW_ACCOUNT_ADDR  — your auditor's Flow account address, e.g. 0xabcd1234
+  FLOW_ACCOUNT_KEY   — hex-encoded private key for that account
 """
 
 import argparse
+import asyncio
 import hashlib
 import io
 import os
@@ -44,12 +49,18 @@ import socket
 import struct
 import threading
 import time
-
+from dotenv import load_dotenv
+from typing import Optional
 import joblib
 import numpy as np
 import pandas as pd
 import requests
 from ecdsa import NIST256p, BadSignatureError, SigningKey, VerifyingKey
+from ecdsa.util import sigencode_string
+from flow_py_sdk import flow_client
+from flow_py_sdk.cadence import String, UFix64, Bool, Address
+from flow_py_sdk.tx import Tx, ProposalKey
+from flow_py_sdk.signer import Signer as FlowSigner
 
 # ── Column names (must match Pico's imu_buildCsvBuffer() exactly) ─────────────
 CSV_COLUMNS  = ['timestamp_ms', 'ax', 'ay', 'az', 'qw', 'qx', 'qy', 'qz']
@@ -67,13 +78,43 @@ BID_PORT        = 5006      # transporter unicast bid listener (separate socket 
 HTTP_PORT       = 8080
 
 # ── Timeouts ──────────────────────────────────────────────────────────────────
-QUORUM_WAIT_S   = 30.0   # how long to wait for PKT_QUORUM after sending a bid
+QUORUM_WAIT_S   = 120.0   # how long to wait for PKT_QUORUM after sending a bid
 DELIVERY_WAIT_S = 15.0   # x402 HTTP request timeout
 VERDICT_WAIT_S  = 10.0   # Flow submission timeout
 
 # ── Flow contract (set via --flow-url and --flow-contract, or env vars) ───────
-FLOW_API_URL_DEFAULT      = "http://localhost:8080"   # mock_transporter for demo
-FLOW_CONTRACT_ADDR_DEFAULT = ""                        # Flow testnet addr when live
+FLOW_API_URL_DEFAULT       = "http://localhost:8080"   # mock_transporter for demo
+FLOW_CONTRACT_ADDR_DEFAULT = "0xfcd23c8d1553708a"      # Flow testnet addr when live
+
+# ── Cadence transaction script ────────────────────────────────────────────────
+# {contract_addr} is substituted at runtime with self.flow_contract_addr
+SUBMIT_VERDICT_SCRIPT = """
+import SwarmVerifierV3 from {contract_addr}
+
+transaction(
+    eventId: String,
+    auditorId: String,
+    verdict: Bool,
+    confidence: UFix64,
+    payloadSignature: String,
+    verdictSignature: String
+) {{
+    prepare(signer: &Account) {{}}
+    execute {{
+        SwarmVerifierV3.submitVerdict(
+            eventId: eventId,
+            auditorId: auditorId,
+            verdict: verdict,
+            confidence: confidence,
+            payloadSignature: payloadSignature,
+            verdictSignature: verdictSignature
+        )
+    }}
+}}
+"""
+
+# ──────── Load env Vars ────────
+load_dotenv()
 
 # ── Verdict canonical format ──────────────────────────────────────────────────
 def _verdict_canonical(pub_hex: str, verdict_bool: bool, confidence: float) -> bytes:
@@ -85,14 +126,40 @@ def _verdict_canonical(pub_hex: str, verdict_bool: bool, confidence: float) -> b
     return f"{pub_hex}:{int(verdict_bool)}:{confidence:.4f}".encode()
 
 # ─────────────────────────────────────────────────────────────────────────────
+class _EcdsaSigner(FlowSigner):
+    def __init__(self, sk: SigningKey):
+        self._sk = sk
+
+    def sign(self, message: bytes, tag: Optional[bytes] = None) -> bytes:
+        if tag is not None:
+            message = tag + message
+        return self._sk.sign(
+            message,
+            hashfunc=hashlib.sha3_256,
+            sigencode=sigencode_string,
+        )
+    
+
+# Cadence script for registerNode
+_REGISTER_NODE_SCRIPT = """
+import SwarmVerifierV3 from {contract_addr}
+transaction(nodeId: String, stake: UFix64) {{
+    prepare(signer: &Account) {{}}
+    execute {{
+        SwarmVerifierV3.registerNode(nodeId: nodeId, stake: stake)
+    }}
+}}
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 class AuditorNode:
     def __init__(
         self,
-        key_path:          str   = "./identity.pem",
-        bid_price:         float = 1.0,
-        flow_api_url:      str   = FLOW_API_URL_DEFAULT,
-        flow_contract_addr: str  = FLOW_CONTRACT_ADDR_DEFAULT,
-        flow_enabled:      bool  = False,
+        key_path:           str   = "./identity.pem",
+        bid_price:          float = 1.0,
+        flow_api_url:       str   = FLOW_API_URL_DEFAULT,
+        flow_contract_addr: str   = FLOW_CONTRACT_ADDR_DEFAULT,
+        flow_enabled:       bool  = False,
     ):
         # ── Cryptographic identity ────────────────────────────────────────────
         self.sk, self.vk = self._load_or_generate_keypair(key_path)
@@ -100,7 +167,7 @@ class AuditorNode:
         self.pub_hex     = self.pub_bytes.hex()  # 128 hex chars
 
         # ── Quorum and bid config ─────────────────────────────────────────────
-        self.bid_price    = float(bid_price)   # FLOW tokens offered per verification
+        self.bid_price = float(bid_price)   # FLOW tokens offered per verification
 
         # ── Flow config ───────────────────────────────────────────────────────
         self.flow_api_url       = flow_api_url.rstrip('/')
@@ -112,6 +179,10 @@ class AuditorNode:
         self._state_lock         = threading.Lock()
         self._transporter_pubkey = None   # bytes[64] — set on PKT_ANOMALY receipt
         self._transporter_ip     = None   # str       — set on PKT_ANOMALY receipt
+        # eventId = submissionSig hex from the 200 /pay response payload.
+        # The contract uses submissionSig as the unique event key, so we must
+        # carry it all the way from x402 response → submitVerdict call.
+        self._current_event_id   = None   # str       — set on /pay 200 response
         self._quorum_event       = threading.Event()  # set when PKT_QUORUM confirmed
 
         # ── Random Forest model (Model B) ─────────────────────────────────────
@@ -122,6 +193,8 @@ class AuditorNode:
         except FileNotFoundError:
             print("[WARN] ./models/auditor_model.joblib not found — ML verification skipped.")
             self.model = None
+
+        self._register_on_flow()
 
         print(f"[*] Auditor ready. pubkey={self.pub_hex[:16]}...")
         print(f"[*] Bid price:   {self.bid_price} FLOW")
@@ -210,35 +283,31 @@ class AuditorNode:
     # ── PKT_ANOMALY handler ───────────────────────────────────────────────────
 
     def _handle_anomaly(self, data: bytes, addr):
-        """
-        PKT_ANOMALY (0x03, 133 bytes):
-          byte  0     : 0x03
-          bytes 1-64  : transporter pubkey
-          bytes 65-68 : confidence float32 LE
-          bytes 69-132: ECDSA sig over bytes 0-68
-        """
         transporter_pubkey = data[1:65]
         confidence         = struct.unpack('<f', data[65:69])[0]
         sig                = data[69:133]
-        signed_region      = data[0:69]
 
-        if not self._verify(signed_region, sig, transporter_pubkey):
+        if not self._verify(data[0:69], sig, transporter_pubkey):
             print(f"[WARN] Anomaly from {addr[0]} — bad signature. Dropping.")
             return
 
         print(f"\n[Anomaly] Verified | transporter={addr[0]} | confidence={confidence:.4f}")
 
-        # Store per-event state and reset the quorum gate
+        # Create a fresh Event for this cycle — prevents any previous
+        # wait thread from clearing or stealing this cycle's quorum signal.
+        cycle_event = threading.Event()
+
         with self._state_lock:
             self._transporter_pubkey = bytes(transporter_pubkey)
             self._transporter_ip     = addr[0]
-            self._quorum_event.clear()
+            self._current_event_id   = None
+            self._quorum_event       = cycle_event   # replace shared ref
 
         self._send_bid(addr[0])
 
-        # Start a quorum wait thread so the main listener is never blocked
         threading.Thread(
             target=self._wait_for_quorum_then_fetch,
+            args=(cycle_event,),
             daemon=True,
         ).start()
 
@@ -247,17 +316,15 @@ class AuditorNode:
         PKT_BID (0x02, 137 bytes):
           byte  0     : 0x02
           bytes 1-64  : auditor pubkey
-          bytes 65-72 : bid price float64 LE   ← new field vs old 129-byte format
+          bytes 65-72 : bid price float64 LE
           bytes 73-136: ECDSA sig over bytes 0-72
 
         Sent unicast to BID_PORT (5006) — the transporter's dedicated bid listener.
-        A separate socket avoids the multicast socket silently dropping unicast
-        packets on some Linux/lwIP configurations.
         """
-        header     = struct.pack('<B', 0x02) + self.pub_bytes       # 65 bytes
+        header      = struct.pack('<B', 0x02) + self.pub_bytes      # 65 bytes
         price_bytes = struct.pack('<d', self.bid_price)              # 8 bytes float64 LE
-        to_sign    = header + price_bytes                            # 73 bytes
-        packet     = to_sign + self._sign(to_sign)                  # 73+64 = 137 bytes
+        to_sign     = header + price_bytes                           # 73 bytes
+        packet      = to_sign + self._sign(to_sign)                 # 73+64 = 137 bytes
         assert len(packet) == 137, f"Bid size mismatch: {len(packet)}"
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -268,56 +335,37 @@ class AuditorNode:
     # ── PKT_QUORUM handler ────────────────────────────────────────────────────
 
     def _handle_quorum(self, data: bytes, addr):
-        """
-        PKT_QUORUM (0x04, 129 bytes):
-          byte  0     : 0x04
-          bytes 1-64  : nominated auditor pubkey  ← who this is addressed to
-          bytes 65-128: ECDSA sig over bytes 0-64, signed by TRANSPORTER
-
-        Verification steps (both must pass):
-          1. Sig is valid using the stored transporter pubkey
-          2. bytes 1-64 == own pubkey (packet is addressed to us)
-        """
         nominated_pubkey = data[1:65]
         sig              = data[65:129]
-        signed_region    = data[0:65]
 
         with self._state_lock:
             transporter_pub = self._transporter_pubkey
+            cycle_event     = self._quorum_event     # grab the current cycle's event
 
         if transporter_pub is None:
-            print(f"[Quorum] Received PKT_QUORUM from {addr[0]} but no active anomaly. Ignoring.")
+            print(f"[Quorum] PKT_QUORUM from {addr[0]} but no active anomaly. Ignoring.")
             return
-
-        # Step 1: verify sig with transporter's pubkey
-        if not self._verify(signed_region, sig, transporter_pub):
+        if not self._verify(data[0:65], sig, transporter_pub):
             print(f"[Quorum] Bad transporter signature from {addr[0]}. Dropping.")
             return
-
-        # Step 2: confirm the packet is addressed to us
         if nominated_pubkey != self.pub_bytes:
-            # This packet is a quorum notification for a different auditor — ignore quietly
             return
 
         print(f"[Quorum] ✓ Selected for quorum by {addr[0]}")
-        self._quorum_event.set()
+        cycle_event.set()   # signals only this cycle's wait thread
 
-    def _wait_for_quorum_then_fetch(self):
-        """
-        Waits up to QUORUM_WAIT_S for a confirmed quorum notification.
-        If confirmed: executes the x402 fetch flow.
-        If timeout: stands down cleanly.
-        """
-        confirmed = self._quorum_event.wait(timeout=QUORUM_WAIT_S)
+
+    def _wait_for_quorum_then_fetch(self, cycle_event: threading.Event):
+        confirmed = cycle_event.wait(timeout=QUORUM_WAIT_S)
         if not confirmed:
-            print("[Quorum] Timeout — not selected for quorum or notification lost. Standing down.")
+            print("[Quorum] Timeout — not selected or notification lost. Standing down.")
             return
 
         with self._state_lock:
             transporter_ip = self._transporter_ip
 
         if not transporter_ip:
-            print("[Quorum] No transporter IP recorded. Cannot proceed.")
+            print("[Quorum] No transporter IP. Cannot proceed.")
             return
 
         self._execute_x402_fetch(transporter_ip)
@@ -328,18 +376,23 @@ class AuditorNode:
         """
         GET  /data?pubkey=<hex>
           → 402 + {nonce}   : proceed
-          → 403             : not in quorum (should not happen after PKT_QUORUM, but handle it)
+          → 403             : not in quorum
           → other           : log and abort
 
         POST /pay  {pubkey, signature_over_nonce}
           → 200 + {csv, payload}   : run verification
           → other                  : log and abort
 
-        The payload field from the 200 response contains:
-          {transporter_pubkey, auditor_pubkey, anomaly_confidence,
-           timestamp_ms, cid, payload_signature}
-        payload_signature is carried through to the verdict body — it ties the
-        auditor's verdict to this specific anomaly event on-chain.
+        The payload object from the 200 response must contain:
+          {
+            transporter_pubkey,   auditor_pubkey,
+            anomaly_confidence,   timestamp_ms,
+            submission_sig,       ← THIS is the eventId the contract uses
+            payload_signature,    ← ties the verdict to this specific event on-chain
+          }
+
+        submission_sig is stored as _current_event_id so _submit_verdict can
+        pass it as the first argument to SwarmVerifierV3.submitVerdict().
         """
         base_url = f"http://{transporter_ip}:{HTTP_PORT}"
 
@@ -397,13 +450,24 @@ class AuditorNode:
                 print("[x402] 200 response missing payload field. Aborting.")
                 return
 
-            # payload_signature ties this verdict to the specific anomaly event on-chain
-            payload_signature = payload.get("payload_signature", "")
+            # submission_sig is the transporter's ECDSA sig over the canonical
+            # payload — the contract registered the event under this exact key.
+            submission_sig = payload.get("submission_sig", "")
+            if not submission_sig:
+                print("[x402] payload.submission_sig missing — cannot identify event on-chain. Aborting.")
+                return
 
+            # payload_signature ties this verdict to the specific anomaly event
+            payload_signature = payload.get("payload_signature", "")
             if not payload_signature:
                 print("[x402] payload.payload_signature missing — verdict chain broken. Aborting.")
                 return
 
+            # Store the eventId so _submit_verdict can pass it to the contract
+            with self._state_lock:
+                self._current_event_id = submission_sig
+
+            print(f"[x402] eventId (submissionSig)={submission_sig[:16]}...")
             self._run_verification(csv_data, payload_signature)
 
         except requests.exceptions.RequestException as e:
@@ -413,11 +477,11 @@ class AuditorNode:
 
     def _run_verification(self, csv_data: str, payload_signature: str):
         """
-        1. Parse CSV — validate column names at runtime (catches training/serving mismatch)
+        1. Parse CSV — validate column names at runtime
         2. Take data_window[-50:] — the drop is at the tail of the 75-row buffer
         3. Flatten to (1, 350) — must match INPUT_TENSOR_SIZE = 50 × 7
         4. Run Random Forest predict() + predict_proba()
-        5. Submit signed verdict to Flow contract (csv_cid always "")
+        5. Submit signed verdict to Flow contract
         """
         if self.model is None:
             print("[ML] No model loaded — cannot produce verdict.")
@@ -426,7 +490,6 @@ class AuditorNode:
         try:
             df = pd.read_csv(io.StringIO(csv_data), names=CSV_COLUMNS, header=0)
 
-            # Validate columns at runtime — catches a training/serving column order mismatch
             missing = [c for c in FEATURE_COLS if c not in df.columns]
             if missing:
                 print(f"[ML] CSV missing columns: {missing}. Got: {list(df.columns)}. Aborting.")
@@ -434,16 +497,14 @@ class AuditorNode:
 
             data_window = df[FEATURE_COLS].values   # shape (≤75, 7)
 
-            # Take LAST 50 rows — the drop event is at the tail, not the head
             if len(data_window) >= WINDOW_SIZE:
                 data_window = data_window[-WINDOW_SIZE:]
             else:
-                # Fewer rows than expected — zero-pad at the front
                 print(f"[ML] Only {len(data_window)} rows, padding to {WINDOW_SIZE}.")
                 padding     = np.zeros((WINDOW_SIZE - len(data_window), len(FEATURE_COLS)))
                 data_window = np.vstack((padding, data_window))
 
-            flattened     = data_window.flatten().reshape(1, -1)   # (1, 350)
+            flattened     = data_window.flatten().reshape(1, -1)
             assert flattened.shape == (1, INPUT_TENSOR_SIZE), \
                 f"Shape mismatch: {flattened.shape} expected (1, {INPUT_TENSOR_SIZE})"
 
@@ -454,8 +515,6 @@ class AuditorNode:
 
             print(f"[ML] Verdict: {'DROP' if verdict_bool else 'NORMAL'} | confidence={confidence:.4f}")
 
-            # csv_cid is always "" at verdict time.
-            # reaches consensus and notifies it — the CID does not exist yet.
             self._submit_verdict(verdict_bool, confidence, payload_signature)
 
         except AssertionError as e:
@@ -463,7 +522,7 @@ class AuditorNode:
         except Exception as e:
             print(f"[ML] Unexpected error: {e}")
 
-        # ── Verdict submission ────────────────────────────────────────────────────
+    # ── Verdict submission ────────────────────────────────────────────────────
 
     def _submit_verdict(
         self,
@@ -472,29 +531,28 @@ class AuditorNode:
         payload_signature: str,
     ):
         """
-        Verdict body (posted to Flow contract):
-          {
-            auditor_pubkey,       ← 128 hex chars
-            verdict,              ← bool
-            verdict_confidence,   ← float
-            csv_cid,              ← always "" (transporter uploads after consensus)
-            payload_signature,    ← ties verdict to specific anomaly event
-          }
+        Reads _current_event_id (set during _execute_x402_fetch) and builds
+        the full verdict body for the Flow contract call.
 
         verdict_sig covers the canonical string:
           "<pubkey>:<0 or 1>:<confidence:.4f>"
-
-        When flow_enabled=True : POST to Flow contract REST API
-        When flow_enabled=False: POST to mock_transporter /verdict (demo/dev mode)
         """
-        canonical  = _verdict_canonical(self.pub_hex, verdict_bool, confidence)
-        sig_hex    = self._sign(canonical).hex()
+        with self._state_lock:
+            event_id = self._current_event_id
+
+        if not event_id:
+            print("[Verdict] No eventId available — x402 payload was missing submission_sig. Aborting.")
+            return
+
+        canonical = _verdict_canonical(self.pub_hex, verdict_bool, confidence)
+        sig_hex   = self._sign(canonical).hex()
 
         body = {
+            "event_id":             event_id,          # submissionSig — contract key
             "auditor_pubkey":       self.pub_hex,
             "verdict":              verdict_bool,
             "verdict_confidence":   confidence,
-            "csv_cid":              "",  # transporter fills this post-consensus
+            "csv_cid":              "",                 # transporter fills post-consensus
             "payload_signature":    payload_signature,
             "verdict_signature":    sig_hex,
         }
@@ -504,46 +562,142 @@ class AuditorNode:
         else:
             self._submit_to_mock(body)
 
-    def _submit_to_flow(self, body: dict):
+    # ── Live Flow submission ──────────────────────────────────────────────────
+    def _register_on_flow(self):
         """
-        Submit verdict as a Flow transaction to the SwarmVerifierV2 contract.
-        Flow testnet REST endpoint: https://rest-testnet.onflow.org/v1/transactions
+        Calls SwarmVerifierV3.registerNode() once on startup so the contract
+        recognises this auditor's pubkey. The contract pre-condition rejects
+        duplicates — safe to call every run.
+        """
+        if not self.flow_enabled:
+            return
 
-        For the hackathon demo this posts to the configured flow_api_url.
-        In production: construct a proper Cadence transaction with the auditor's
-        ECDSA key as the Flow account key.
-        """
-        url = f"{self.flow_api_url}/verdict"
-        print(f"[Flow] Submitting verdict to {url} ...")
+        flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "").removeprefix("0x")
+        flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "").removeprefix("0x")
+
+        if not flow_addr or not flow_key:
+            print("[Flow] Cannot registerNode — FLOW_ACCOUNT_ADDR/KEY not set.")
+            return
+
+        asyncio.run(self._register_on_flow_async(flow_addr, flow_key))
+
+    async def _register_on_flow_async(self, flow_addr: str, flow_key: str):
+        script = _REGISTER_NODE_SCRIPT.format(contract_addr=self.flow_contract_addr)
+        stake_ufix = int(10.0 * 1e8)   # minimum stake: 10.0 FLOW
+        sk     = SigningKey.from_string(bytes.fromhex(flow_key), curve=NIST256p)
+        signer = _EcdsaSigner(sk)
+        addr   = Address.from_hex(flow_addr)
+
         try:
-            resp = requests.post(url, json=body, timeout=VERDICT_WAIT_S)
-            if resp.status_code in (200, 201):
-                print(f"[Flow] ✓ Verdict accepted. Response: {resp.status_code}")
+            async with flow_client(
+                host="access.devnet.nodes.onflow.org",
+                port=9000,
+            ) as client:
+                account      = await client.get_account(address=addr)
+                account_key  = account.keys[0]
+                latest_block = await client.get_latest_block(is_sealed=True)
+
+                tx = (
+                    Tx(code=script)
+                    .with_reference_block_id(latest_block.id)
+                    .with_gas_limit(999)
+                    .with_proposal_key(ProposalKey(
+                        key_address         = addr,
+                        key_id              = account_key.index,
+                        key_sequence_number = account_key.sequence_number,
+                    ))
+                    .with_payer(addr)
+                    .add_authorizers(addr)
+                    .with_envelope_signature(addr, account_key.index, signer)
+                    .add_arguments(String(self.pub_hex))
+                    .add_arguments(UFix64(stake_ufix))
+                )
+                result = await client.execute_transaction(tx, wait_for_seal=True, timeout=60.0)
+                print(f"[Flow] ✓ registerNode sealed — https://testnet.flowscan.io/tx/{result.id.hex()}")
+        except Exception as e:
+            if "already registered" not in str(e):
+                print(f"[Flow] registerNode error: {e}")
             else:
-                print(f"[Flow] ✗ Verdict rejected: {resp.status_code} — {resp.text[:120]}")
+                print("[Flow] Auditor already registered on-chain.")
+
+
+    def _submit_to_flow(self, body: dict):
+        """Sync wrapper — asyncio.run() keeps callers simple."""
+        asyncio.run(self._submit_to_flow_async(body))
+
+    async def _submit_to_flow_async(self, body: dict):
+        flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "")
+        flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "")
+
+        if not flow_addr or not flow_key:
+            print("[Flow] FLOW_ACCOUNT_ADDR or FLOW_ACCOUNT_KEY not set.")
+            return
+
+        script = SUBMIT_VERDICT_SCRIPT.format(contract_addr=self.flow_contract_addr)
+        confidence_ufix64 = int(body["verdict_confidence"] * 1e8)
+        sk      = SigningKey.from_string(bytes.fromhex(flow_key.removeprefix("0x")), curve=NIST256p)
+        signer  = _EcdsaSigner(sk)
+        addr    = Address.from_hex(flow_addr)
+
+        try:
+            async with flow_client(
+                host="access.devnet.nodes.onflow.org",
+                port=9000,
+            ) as client:
+                account      = await client.get_account(address=addr)
+                account_key  = account.keys[0]
+                latest_block = await client.get_latest_block(is_sealed=True)
+
+                tx = (
+                    Tx(code=script)
+                    .add_arguments(String(body["event_id"]))
+                    .add_arguments(String(body["auditor_pubkey"]))
+                    .add_arguments(Bool(body["verdict"]))
+                    .add_arguments(UFix64(confidence_ufix64))
+                    .add_arguments(String(body["payload_signature"]))
+                    .add_arguments(String(body["verdict_signature"]))
+                    .with_reference_block_id(latest_block.id)
+                    .with_gas_limit(100)
+                    .with_proposal_key(ProposalKey(
+                        key_address         = addr,
+                        key_id              = account_key.index,
+                        key_sequence_number = account_key.sequence_number,
+                    ))
+                    .with_payer(addr)
+                    .add_authorizers(addr)                              # ← correct method
+                    .with_envelope_signature(addr, account_key.index, signer)  # ← correct signing
+                )
+
+                tx_result = await client.execute_transaction(tx, wait_for_seal=True, timeout=30.0)
+                tx_id = tx_result.id.hex() if hasattr(tx_result, 'id') else "unknown"
+                print(f"[Flow] ✓ Transaction submitted. TX ID: {tx_id}")
+                print(f"[Flow]   https://testnet.flowscan.io/tx/{tx_id}")
+
         except Exception as e:
             print(f"[Flow] Submission error: {e}")
 
-    def _submit_to_mock(self, body: dict):
-        """
-        In demo/dev mode, submit to the mock_transporter's /verdict endpoint.
-        This updates the dashboard and triggers simulated on-chain consensus.
-        Remove this method once SwarmVerifierV2 is live on Flow Testnet.
-        """
-        with self._state_lock:
-            transporter_ip = self._transporter_ip
+        # ── Mock submission (dev/demo) ────────────────────────────────────────────
 
-        if not transporter_ip:
-            print("[Verdict] No transporter IP — cannot submit.")
-            return
+        def _submit_to_mock(self, body: dict):
+            """
+            In demo/dev mode, submit to the mock_transporter's /verdict endpoint.
+            This updates the dashboard and triggers simulated on-chain consensus.
+            Remove once SwarmVerifierV3 is live on Flow Testnet.
+            """
+            with self._state_lock:
+                transporter_ip = self._transporter_ip
 
-        url = f"http://{transporter_ip}:{HTTP_PORT}/verdict"
-        print(f"[Verdict] Submitting to mock transporter at {url} ...")
-        try:
-            resp = requests.post(url, json=body, timeout=VERDICT_WAIT_S)
-            print(f"[Verdict] Response: {resp.status_code}")
-        except Exception as e:
-            print(f"[Verdict] Submission error: {e}")
+            if not transporter_ip:
+                print("[Verdict] No transporter IP — cannot submit.")
+                return
+
+            url = f"http://{transporter_ip}:{HTTP_PORT}/verdict"
+            print(f"[Verdict] Submitting to mock transporter at {url} ...")
+            try:
+                resp = requests.post(url, json=body, timeout=VERDICT_WAIT_S)
+                print(f"[Verdict] Response: {resp.status_code}")
+            except Exception as e:
+                print(f"[Verdict] Submission error: {e}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -556,43 +710,38 @@ def main():
         "--key-file",
         default="./identity.pem",
         help="Path to PEM file for persistent ECDSA identity. "
-             "Generated on first run if absent. "
-             "Run multiple auditors with different files: "
-             "--key-file ./identity_2.pem",
+             "Generated on first run if absent.",
     )
     parser.add_argument(
         "--bid-price",
         type=float,
         default=1.0,
-        help="Bid price in FLOW tokens per verification job. "
-             "Lower bids rank higher in quorum selection "
-             "(combined with reputation and stake weighting).",
+        help="Bid price in FLOW tokens per verification job.",
     )
     parser.add_argument(
         "--flow-url",
         default=os.environ.get("FLOW_API_URL", FLOW_API_URL_DEFAULT),
-        help="Flow contract REST API URL. Defaults to mock_transporter on localhost. "
-             "Set to https://rest-testnet.onflow.org for live testnet. "
-             "Can also be set via FLOW_API_URL env var.",
+        help="Flow contract REST API URL. Defaults to mock_transporter on localhost.",
     )
     parser.add_argument(
         "--flow-contract",
         default=os.environ.get("FLOW_CONTRACT_ADDR", FLOW_CONTRACT_ADDR_DEFAULT),
-        help="SwarmVerifierV2 contract address on Flow Testnet. "
-             "Can also be set via FLOW_CONTRACT_ADDR env var.",
+        help="SwarmVerifierV3 contract address on Flow Testnet.",
     )
     parser.add_argument(
         "--flow-enabled",
         action="store_true",
         default=False,
-        help="Submit verdicts to the Flow contract REST API instead of mock_transporter. "
-             "Requires --flow-url and --flow-contract to be set correctly.",
+        help="Submit verdicts to the live Flow contract instead of mock_transporter. "
+             "Requires FLOW_ACCOUNT_ADDR and FLOW_ACCOUNT_KEY env vars.",
     )
     args = parser.parse_args()
 
-    if args.flow_enabled and not args.flow_contract:
-        print("[WARN] --flow-enabled set but --flow-contract is empty. "
-              "Verdict submissions may fail.")
+    if args.flow_enabled:
+        missing_env = [v for v in ("FLOW_ACCOUNT_ADDR", "FLOW_ACCOUNT_KEY") if not os.environ.get(v)]
+        if missing_env:
+            print(f"[WARN] --flow-enabled is set but missing env vars: {missing_env}")
+            print("[WARN] Verdict submissions will fail until these are set.")
 
     node = AuditorNode(
         key_path           = args.key_file,
