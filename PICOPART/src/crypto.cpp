@@ -1,104 +1,63 @@
 #include "crypto.h"
-
-#include <Arduino.h>
-#include <string.h>
-
-#include "uECC.h"
 #include "sha256.h"
-#include "pico/rand.h"
+#include <uECC.h>
+#include <pico/rand.h>
+#include <string.h>
+#include <Arduino.h>
 
-uint8_t g_publicKey[PUBKEY_SIZE];
-uint8_t g_privateKey[PRIVKEY_SIZE];
-
-static int rng_callback(uint8_t* dest, unsigned int size) {
-    for (unsigned int i = 0; i < size; i += 4) {
+// ── RNG for micro-ecc — uses RP2350 hardware TRNG ────────────────────────────
+static int _uECC_rng(uint8_t *dest, unsigned size) {
+    for (unsigned i = 0; i < size; i += 4) {
         uint32_t r = get_rand_32();
-        unsigned int remaining = size - i;
-        unsigned int chunk = remaining < 4 ? remaining : 4;
-        memcpy(dest + i, &r, chunk);
+        unsigned left = size - i;
+        memcpy(dest + i, &r, left < 4 ? left : 4);
     }
     return 1;
 }
 
-bool generateKeyPair() {
-    uECC_set_rng(rng_callback);
-
-    const struct uECC_Curve_t* curve = uECC_secp256r1();
-
-    int result = uECC_make_key(g_publicKey, g_privateKey, curve);
-    if (result != 1) {
-        Serial.println("[Crypto] ERROR: Key generation failed.");
-        return false;
-    }
-
-    char pubHex[PUBKEY_SIZE * 2 + 1];
-    bytesToHex(g_publicKey, PUBKEY_SIZE, pubHex);
-    Serial.print("[CRYPTO] Public key: ");
-    Serial.println(pubHex);
-
-    return true;
+void crypto_init() {
+    uECC_set_rng(_uECC_rng);
 }
 
-void sha256 (const uint8_t* data, size_t dataLen, uint8_t outHash[HASH_SIZE]) {
-    SHA256_CTX ctx;
-    sha256_init(&ctx);
-    sha256_update(&ctx, data, dataLen);
-    sha256_final(&ctx, outHash);
+bool crypto_keygen(uint8_t *priv_out, uint8_t *pub_out) {
+    return uECC_make_key(pub_out, priv_out, uECC_secp256r1()) == 1;
 }
 
-bool signPayload(const uint8_t* payload, size_t payloadLen, uint8_t outSignature[SIG_SIZE]){
-    uint8_t hash[HASH_SIZE];
-    sha256(payload, payloadLen, hash);
-
-    const struct uECC_Curve_t* curve = uECC_secp256r1();
-    int result = uECC_sign(g_privateKey, hash, HASH_SIZE, outSignature, curve);
-
-    if (result != 1) {
-        Serial.println("[CRYPTO] ERROR: Signing Failed.");
-        return 0;
-    }
-
-    return 1;
+bool crypto_sign(const uint8_t *priv, const uint8_t *msg, size_t msg_len,
+                 uint8_t *sig_out) {
+    uint8_t hash[HASH_BYTES];
+    sha256_bytes(msg, msg_len, hash);
+    return uECC_sign(priv, hash, HASH_BYTES, sig_out, uECC_secp256r1()) == 1;
 }
 
-bool verifySignature(const uint8_t* payload, size_t payloadLen, const uint8_t signature[SIG_SIZE], const uint8_t senderPublicKey[PUBKEY_SIZE]){
-    uint8_t hash[HASH_SIZE];
-    sha256(payload, payloadLen, hash);
-    const struct uECC_Curve_t* curve = uECC_secp256r1();
-
-    int result = uECC_verify(senderPublicKey, hash, HASH_SIZE, signature, curve);
-    return (result == 1);
+bool crypto_verify(const uint8_t *pub, const uint8_t *msg, size_t msg_len,
+                   const uint8_t *sig) {
+    uint8_t hash[HASH_BYTES];
+    sha256_bytes(msg, msg_len, hash);
+    return uECC_verify(pub, hash, HASH_BYTES, sig, uECC_secp256r1()) == 1;
 }
 
-void bytesToHex(const uint8_t* bytes, size_t len, char* outHex) {
-    static const char hexChars[] = "0123456789abcdef";
+void bytes_to_hex(const uint8_t *in, size_t len, char *out) {
+    static const char hx[] = "0123456789abcdef";
     for (size_t i = 0; i < len; i++) {
-        outHex[i * 2]     = hexChars[(bytes[i] >> 4) & 0xF];
-        outHex[i * 2 + 1] = hexChars[bytes[i] & 0xF];
+        out[i*2]   = hx[in[i] >> 4];
+        out[i*2+1] = hx[in[i] & 0xf];
     }
-    outHex[len * 2] = '\0';
+    out[len*2] = '\0';
 }
 
-bool hexToBytes(const char* hex, uint8_t* outBytes, size_t* outLen) {
-    size_t hexLen = strlen(hex);
-    if (hexLen % 2 != 0) return false;  // must be even number of chars
-
-    *outLen = hexLen / 2;
-    for (size_t i = 0; i < *outLen; i++) {
-        char hi = hex[i * 2];
-        char lo = hex[i * 2 + 1];
-
-        auto hexVal = [](char c) -> int {
+bool hex_to_bytes(const char *hex, size_t hex_len, uint8_t *out) {
+    if (hex_len % 2 != 0) return false;
+    for (size_t i = 0; i < hex_len; i += 2) {
+        auto nibble = [](char c) -> int {
             if (c >= '0' && c <= '9') return c - '0';
             if (c >= 'a' && c <= 'f') return c - 'a' + 10;
             if (c >= 'A' && c <= 'F') return c - 'A' + 10;
             return -1;
         };
-
-        int hiVal = hexVal(hi);
-        int loVal = hexVal(lo);
-        if (hiVal < 0 || loVal < 0) return false;  // invalid char
-        outBytes[i] = (uint8_t)((hiVal << 4) | loVal);
+        int hi = nibble(hex[i]), lo = nibble(hex[i+1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i/2] = (uint8_t)((hi << 4) | lo);
     }
     return true;
 }
