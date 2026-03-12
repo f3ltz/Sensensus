@@ -576,8 +576,8 @@ class AuditorNode:
         if not self.flow_enabled:
             return
 
-        flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "").removeprefix("0x")
-        flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "").removeprefix("0x")
+        flow_addr = os.environ.get("TESTNET_ADDRESS", "").removeprefix("0x")
+        flow_key  = os.environ.get("PRIVATE_KEY",  "").removeprefix("0x")
 
         if not flow_addr or not flow_key:
             print("[Flow] Cannot registerNode — FLOW_ACCOUNT_ADDR/KEY not set.")
@@ -638,8 +638,8 @@ class AuditorNode:
         asyncio.run(self._submit_to_flow_async(body))
 
     async def _submit_to_flow_async(self, body: dict):
-        flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "")
-        flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "")
+        flow_addr = os.environ.get("TESTNET_ADDRESS", "")
+        flow_key  = os.environ.get("PRIVATE_KEY",  "")
 
         if not flow_addr or not flow_key:
             print("[Flow] FLOW_ACCOUNT_ADDR or FLOW_ACCOUNT_KEY not set.")
@@ -757,7 +757,7 @@ def main():
     args = parser.parse_args()
 
     if args.flow_enabled:
-        missing_env = [v for v in ("FLOW_ACCOUNT_ADDR", "FLOW_ACCOUNT_KEY") if not os.environ.get(v)]
+        missing_env = [v for v in ("TESTNET_ADDRESS", "PRIVATE_KEY") if not os.environ.get(v)]
         if missing_env:
             print(f"[WARN] --flow-enabled is set but missing env vars: {missing_env}")
             print("[WARN] Verdict submissions will fail until these are set.")

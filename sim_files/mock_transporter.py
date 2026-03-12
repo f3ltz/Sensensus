@@ -81,7 +81,7 @@ CSV_BUFFER_SAMPLES = 75
 WINDOW_SIZE        = 50
 
 BID_WINDOW_S      = 0.6    # collect bids before selecting quorum
-VERDICT_TIMEOUT_S = 30.0   # wait for all quorum verdicts before force-finalizing
+VERDICT_TIMEOUT_S = 55.0   # wait for all quorum verdicts before force-finalizing
 
 # Quorum scoring weights (must match QUORUM_W_* build flags in config.h)
 W_PRICE = 0.5
@@ -372,7 +372,10 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self._cors()
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except BrokenPipeError:
+            pass  # client disconnected, nothing to do
 
     def do_GET(self):
         parsed    = urlparse(self.path)
@@ -1110,21 +1113,43 @@ def trigger_anomaly():
     print(f"[Anomaly] HTTP server armed. Waiting up to {VERDICT_TIMEOUT_S}s for verdicts...")
 
     if FLOW_ENABLED:
-        # Auditors submit directly to the Flow contract — /verdict is never called.
-        # Wait the full window so auditors have time to complete x402 + inference +
-        # on-chain submission, then trigger finalizeEvent on-chain.
-        # NEW
-        time.sleep(VERDICT_TIMEOUT_S)
         saved_event_id = state.current_event_id
+
+        # Wait for registerAnomaly to seal before starting the verdict window.
+        # Auditors are already blocked at POST /pay on register_sealed — once
+        # that fires, the contract's verdictTimeoutSecs clock starts ticking.
+        print("[Flow] Waiting for registerAnomaly to seal before starting verdict window...")
+        state.register_sealed.wait(timeout=60)
+
+        print(f"[Flow] registerAnomaly sealed. Waiting {VERDICT_TIMEOUT_S}s verdict window...")
+        deadline = time.time() + VERDICT_TIMEOUT_S
+
+        # Poll until all verdicts arrive or deadline
+        while time.time() < deadline:
+            # Check on-chain pending event for verdict count
+            with state.verdicts_lock:
+                received = len(state.verdicts)
+            if received >= state.expected_verdicts:
+                print(f"[Flow] All {received} verdicts received early — proceeding to finalize")
+                break
+            time.sleep(1)
+        else:
+            with state.verdicts_lock:
+                received = len(state.verdicts)
+            print(f"[Flow] Verdict window elapsed — {received}/{state.expected_verdicts} received")
+
+        # Wait an extra buffer for auditor Flow txs to seal on-chain.
+        # Contract verdictTimeoutSecs=60, our window is VERDICT_TIMEOUT_S=30 —
+        # but contract clock starts when registerAnomaly seals, same as us now.
+        # Add 20s buffer for block propagation lag.
+        print("[Flow] Waiting 20s for auditor txs to seal on-chain...")
+        time.sleep(20)
+
         if saved_event_id:
-            print("[Flow] Verdict window elapsed — waiting 15s for auditor txs to seal...")
-            time.sleep(15)
-            # After the 15s seal wait, before calling finalizeEvent:
             print("[Flow] Calling finalizeEvent on-chain...")
-            state.system_status = "FINALIZING"   # ← add this
-            threading.Thread(
-                target=_finalize_event_on_flow, args=(saved_event_id,), daemon=True
-            ).start()
+            state.system_status = "FINALIZING"
+            _finalize_event_on_flow(saved_event_id)  # call directly, not in thread
+
         state.system_status = "IDLE"
     else:
         # Mock mode — auditors POST to /verdict, _handle_verdict drives finalization.
@@ -1147,16 +1172,16 @@ def trigger_anomaly():
     print("[Anomaly] Cycle complete, returning to IDLE\n")
 
 
-_flow_tx_lock = threading.Lock()
+_flow_tx_lock = asyncio.Lock()
 
 async def _flow_tx_async(script, build_args_fn, label, wait_seal=False):
-    flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "").removeprefix("0x")
-    flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "").removeprefix("0x")
+    flow_addr = os.environ.get("TESTNET_ADDRESS", "").removeprefix("0x")
+    flow_key  = os.environ.get("PRIVATE_KEY",  "").removeprefix("0x")
     if not flow_addr or not flow_key:
         print(f"[Flow] FLOW_ACCOUNT_ADDR/FLOW_ACCOUNT_KEY not set — {label} skipped")
         return None
 
-    with _flow_tx_lock:
+    async with _flow_tx_lock:
         for attempt in range(3):
             try:
                 async with flow_client(host="access.devnet.nodes.onflow.org", port=9000) as client:
