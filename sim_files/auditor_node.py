@@ -355,10 +355,14 @@ class AuditorNode:
         cycle_event.set()   # signals only this cycle's wait thread
 
 
+    # NEW
     def _wait_for_quorum_then_fetch(self, cycle_event: threading.Event):
         confirmed = cycle_event.wait(timeout=QUORUM_WAIT_S)
         if not confirmed:
-            print("[Quorum] Timeout — not selected or notification lost. Standing down.")
+            with self._state_lock:
+                already_handled = self._quorum_event is not cycle_event
+            if not already_handled:
+                print("[Quorum] Timeout — not selected or notification lost. Standing down.")
             return
 
         with self._state_lock:
@@ -583,43 +587,51 @@ class AuditorNode:
 
     async def _register_on_flow_async(self, flow_addr: str, flow_key: str):
         script = _REGISTER_NODE_SCRIPT.format(contract_addr=self.flow_contract_addr)
-        stake_ufix = int(10.0 * 1e8)   # minimum stake: 10.0 FLOW
+        stake_ufix = int(10.0 * 1e8)
         sk     = SigningKey.from_string(bytes.fromhex(flow_key), curve=NIST256p)
         signer = _EcdsaSigner(sk)
         addr   = Address.from_hex(flow_addr)
 
-        try:
-            async with flow_client(
-                host="access.devnet.nodes.onflow.org",
-                port=9000,
-            ) as client:
-                account      = await client.get_account(address=addr)
-                account_key  = account.keys[0]
-                latest_block = await client.get_latest_block(is_sealed=True)
+        for attempt in range(3):
+            try:
+                async with flow_client(
+                    host="access.devnet.nodes.onflow.org",
+                    port=9000,
+                ) as client:
+                    account      = await client.get_account(address=addr)
+                    account_key  = account.keys[0]
+                    latest_block = await client.get_latest_block(is_sealed=True)
 
-                tx = (
-                    Tx(code=script)
-                    .with_reference_block_id(latest_block.id)
-                    .with_gas_limit(999)
-                    .with_proposal_key(ProposalKey(
-                        key_address         = addr,
-                        key_id              = account_key.index,
-                        key_sequence_number = account_key.sequence_number,
-                    ))
-                    .with_payer(addr)
-                    .add_authorizers(addr)
-                    .with_envelope_signature(addr, account_key.index, signer)
-                    .add_arguments(String(self.pub_hex))
-                    .add_arguments(UFix64(stake_ufix))
-                )
-                result = await client.execute_transaction(tx, wait_for_seal=True, timeout=60.0)
-                print(f"[Flow] ✓ registerNode sealed — https://testnet.flowscan.io/tx/{result.id.hex()}")
-        except Exception as e:
-            if "already registered" not in str(e):
+                    tx = (
+                        Tx(code=script)
+                        .with_reference_block_id(latest_block.id)
+                        .with_gas_limit(999)
+                        .with_proposal_key(ProposalKey(
+                            key_address         = addr,
+                            key_id              = account_key.index,
+                            key_sequence_number = account_key.sequence_number,
+                        ))
+                        .with_payer(addr)
+                        .add_authorizers(addr)
+                        .with_envelope_signature(addr, account_key.index, signer)
+                        .add_arguments(String(self.pub_hex))
+                        .add_arguments(UFix64(stake_ufix))
+                    )
+                    result = await client.execute_transaction(tx, wait_for_seal=True, timeout=60.0)
+                    print(f"[Flow] ✓ registerNode sealed — https://testnet.flowscan.io/tx/{result.id.hex()}")
+                    return
+
+            except Exception as e:
+                err = str(e)
+                if "already registered" in err:
+                    print("[Flow] Auditor already registered on-chain.")
+                    return
+                if "sequence number" in err and attempt < 2:
+                    print(f"[Flow] Sequence number mismatch on attempt {attempt + 1}, retrying in 3s...")
+                    await asyncio.sleep(3)
+                    continue
                 print(f"[Flow] registerNode error: {e}")
-            else:
-                print("[Flow] Auditor already registered on-chain.")
-
+                return
 
     def _submit_to_flow(self, body: dict):
         """Sync wrapper — asyncio.run() keeps callers simple."""
@@ -639,65 +651,72 @@ class AuditorNode:
         signer  = _EcdsaSigner(sk)
         addr    = Address.from_hex(flow_addr)
 
-        try:
-            async with flow_client(
-                host="access.devnet.nodes.onflow.org",
-                port=9000,
-            ) as client:
-                account      = await client.get_account(address=addr)
-                account_key  = account.keys[0]
-                latest_block = await client.get_latest_block(is_sealed=True)
+        for attempt in range(3):
+            try:
+                async with flow_client(
+                    host="access.devnet.nodes.onflow.org",
+                    port=9000,
+                ) as client:
+                    account      = await client.get_account(address=addr)
+                    account_key  = account.keys[0]
+                    latest_block = await client.get_latest_block(is_sealed=True)
 
-                tx = (
-                    Tx(code=script)
-                    .add_arguments(String(body["event_id"]))
-                    .add_arguments(String(body["auditor_pubkey"]))
-                    .add_arguments(Bool(body["verdict"]))
-                    .add_arguments(UFix64(confidence_ufix64))
-                    .add_arguments(String(body["payload_signature"]))
-                    .add_arguments(String(body["verdict_signature"]))
-                    .with_reference_block_id(latest_block.id)
-                    .with_gas_limit(100)
-                    .with_proposal_key(ProposalKey(
-                        key_address         = addr,
-                        key_id              = account_key.index,
-                        key_sequence_number = account_key.sequence_number,
-                    ))
-                    .with_payer(addr)
-                    .add_authorizers(addr)                              # ← correct method
-                    .with_envelope_signature(addr, account_key.index, signer)  # ← correct signing
-                )
+                    tx = (
+                        Tx(code=script)
+                        .add_arguments(String(body["event_id"]))
+                        .add_arguments(String(body["auditor_pubkey"]))
+                        .add_arguments(Bool(body["verdict"]))
+                        .add_arguments(UFix64(confidence_ufix64))
+                        .add_arguments(String(body["payload_signature"]))
+                        .add_arguments(String(body["verdict_signature"]))
+                        .with_reference_block_id(latest_block.id)
+                        .with_gas_limit(100)
+                        .with_proposal_key(ProposalKey(
+                            key_address         = addr,
+                            key_id              = account_key.index,
+                            key_sequence_number = account_key.sequence_number,
+                        ))
+                        .with_payer(addr)
+                        .add_authorizers(addr)
+                        .with_envelope_signature(addr, account_key.index, signer)
+                    )
 
-                tx_result = await client.execute_transaction(tx, wait_for_seal=True, timeout=30.0)
-                tx_id = tx_result.id.hex() if hasattr(tx_result, 'id') else "unknown"
-                print(f"[Flow] ✓ Transaction submitted. TX ID: {tx_id}")
-                print(f"[Flow]   https://testnet.flowscan.io/tx/{tx_id}")
+                    tx_result = await client.execute_transaction(tx, wait_for_seal=True, timeout=30.0)
+                    tx_id = tx_result.id.hex() if hasattr(tx_result, 'id') else "unknown"
+                    print(f"[Flow] ✓ Transaction submitted. TX ID: {tx_id}")
+                    print(f"[Flow]   https://testnet.flowscan.io/tx/{tx_id}")
+                    return
 
-        except Exception as e:
-            print(f"[Flow] Submission error: {e}")
+            except Exception as e:
+                if "sequence number" in str(e) and attempt < 2:
+                    print(f"[Flow] Sequence number mismatch on attempt {attempt + 1}, retrying in 3s...")
+                    await asyncio.sleep(3)
+                    continue
+                print(f"[Flow] Submission error: {e}")
+                return
 
         # ── Mock submission (dev/demo) ────────────────────────────────────────────
 
-        def _submit_to_mock(self, body: dict):
-            """
-            In demo/dev mode, submit to the mock_transporter's /verdict endpoint.
-            This updates the dashboard and triggers simulated on-chain consensus.
-            Remove once SwarmVerifierV3 is live on Flow Testnet.
-            """
-            with self._state_lock:
-                transporter_ip = self._transporter_ip
+    def _submit_to_mock(self, body: dict):
+        """
+        In demo/dev mode, submit to the mock_transporter's /verdict endpoint.
+        This updates the dashboard and triggers simulated on-chain consensus.
+        Remove once SwarmVerifierV3 is live on Flow Testnet.
+        """
+        with self._state_lock:
+            transporter_ip = self._transporter_ip
 
-            if not transporter_ip:
-                print("[Verdict] No transporter IP — cannot submit.")
-                return
+        if not transporter_ip:
+            print("[Verdict] No transporter IP — cannot submit.")
+            return
 
-            url = f"http://{transporter_ip}:{HTTP_PORT}/verdict"
-            print(f"[Verdict] Submitting to mock transporter at {url} ...")
-            try:
-                resp = requests.post(url, json=body, timeout=VERDICT_WAIT_S)
-                print(f"[Verdict] Response: {resp.status_code}")
-            except Exception as e:
-                print(f"[Verdict] Submission error: {e}")
+        url = f"http://{transporter_ip}:{HTTP_PORT}/verdict"
+        print(f"[Verdict] Submitting to mock transporter at {url} ...")
+        try:
+            resp = requests.post(url, json=body, timeout=VERDICT_WAIT_S)
+            print(f"[Verdict] Response: {resp.status_code}")
+        except Exception as e:
+            print(f"[Verdict] Submission error: {e}")
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
