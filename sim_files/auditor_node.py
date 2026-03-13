@@ -654,8 +654,8 @@ class AuditorNode:
         asyncio.run(self._submit_to_flow_async(body))
 
     async def _submit_to_flow_async(self, body: dict):
-        flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "")
-        flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "")
+        flow_addr = os.environ.get("TESTNET_ADDRESS", "")
+        flow_key  = os.environ.get("PRIVATE_KEY",  "")
 
         if not flow_addr or not flow_key:
             print("[Flow] FLOW_ACCOUNT_ADDR or FLOW_ACCOUNT_KEY not set — falling back to mock.")
