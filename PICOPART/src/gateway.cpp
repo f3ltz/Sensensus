@@ -1,83 +1,109 @@
+// gateway.cpp — Pico 2W application-layer gateway
+// Architecture: PL_Genesis Hackathon 2026
+//
+// Thin wrapper around flow_tx.cpp and the Storacha HTTPS upload.
+// No relay server is used. When FLOW_ENABLED=0 every function simulates
+// locally so the full firmware runs without a live Flow testnet deployment.
+//
+// Flow TX call sites and their wait_seal semantics:
+//
+//   gateway_init             → flow_tx_register_node    (wait_seal=true, once at boot)
+//   gateway_register_anomaly → flow_tx_register_anomaly (wait_seal=true)
+//   gateway_submit_deposit   → flow_tx_submit_deposit   (wait_seal=true, per auditor)
+//   gateway_finalize_event   → flow_tx_finalize_event   (fire-and-forget)
+//   gateway_update_event_cid → flow_tx_update_cid       (fire-and-forget)
+//   gateway_query_node       → flow_tx_query_node       (read-only script, no signing)
+
 #include "gateway.h"
+#include "flow_tx.h"
 #include "config.h"
 #include <WiFiClientSecure.h>
 #include <ArduinoJson.h>
 #include <Arduino.h>
 #include <string.h>
 
-// ── Internal HTTPS helper ─────────────────────────────────────────────────────
-// For testnet/demo we use setInsecure() — acceptable for a hackathon.
-// For production: load the ISRG Root X1 certificate via setCACert().
-static int _https_post(const char *host, int port, const char *path,
-                       const char *content_type, const char *body,
-                       char *resp_buf, size_t resp_buf_size) {
-    WiFiClientSecure cli;
-    cli.setInsecure();   // skip cert validation — fine for testnet demo
+// ── HTTPS helper (Storacha only — Flow uses flow_tx's internal helper) ────────
+static int _storacha_post(const char *host, int port, const char *path,
+                           const char *content_type, const char *body,
+                           char *resp_buf, size_t resp_size) {
+    WiFiClientSecure cli; cli.setInsecure();
     if (!cli.connect(host, port)) {
-        Serial.printf("[GW] HTTPS connect to %s failed\n", host);
-        return -1;
+        Serial.printf("[GW] Storacha connect failed: %s\n", host); return -1;
     }
-    cli.printf("POST %s HTTP/1.0\r\n", path);
-    cli.printf("Host: %s\r\n", host);
-    cli.printf("Content-Type: %s\r\n", content_type);
-    cli.printf("Content-Length: %d\r\n", (int)strlen(body));
-    cli.printf("Connection: close\r\n\r\n");
+    cli.printf("POST %s HTTP/1.0\r\nHost: %s\r\nContent-Type: %s\r\n"
+               "Content-Length: %d\r\nConnection: close\r\n\r\n",
+               path, host, content_type, (int)strlen(body));
     cli.print(body);
-
-    uint32_t deadline = millis() + 10000;
-    while (!cli.available() && millis() < deadline) delay(10);
-
-    // Read status line
-    String status_line = cli.readStringUntil('\n');
-    int code = 0;
-    sscanf(status_line.c_str(), "HTTP/%*s %d", &code);
-
-    // Skip headers
-    while (cli.connected() || cli.available()) {
-        String line = cli.readStringUntil('\n');
-        if (line == "\r" || line.length() == 0) break;
+    uint32_t dl = millis()+10000;
+    while (!cli.available()&&millis()<dl) delay(10);
+    String sl = cli.readStringUntil('\n'); int code=0;
+    sscanf(sl.c_str(), "HTTP/%*s %d", &code);
+    while (cli.connected()||cli.available()) {
+        String l=cli.readStringUntil('\n');
+        if (l=="\r"||!l.length()) break;
     }
-
-    // Read body
-    size_t n = 0;
-    while ((cli.connected() || cli.available()) && n < resp_buf_size - 1) {
-        if (cli.available()) resp_buf[n++] = cli.read();
+    size_t n=0;
+    while ((cli.connected()||cli.available())&&n<resp_size-1) {
+        if (cli.available()) resp_buf[n++]=cli.read();
     }
-    resp_buf[n] = '\0';
-    cli.stop();
-    return code;
+    resp_buf[n]='\0'; cli.stop(); return code;
+}
+
+// ── Boot initialisation ───────────────────────────────────────────────────────
+void gateway_init(const uint8_t *priv_32) {
+#if FLOW_ENABLED
+    flow_tx_init(
+        priv_32,
+        FLOW_ACCOUNT_ADDR,    // build flag: e.g. "0x1234567890abcdef"
+        FLOW_CONTRACT_ADDR,   // build flag: deployed SwarmVerifierV3 address
+        "rest-testnet.onflow.org"
+    );
+
+    // registerNode is idempotent — the contract pre-condition rejects duplicates.
+    // It is safe to call on every cold boot. Failure is non-fatal: the Pico can
+    // still participate in quorum scoring from the chain's existing record.
+    extern const uint8_t g_pubKey[];  // declared in crypto.h
+    extern char          g_pubHex[];  // set in main.cpp after key generation
+
+    Serial.println("[GW] Registering node on Flow testnet...");
+    bool ok = flow_tx_register_node(g_pubHex, /*stake=*/10.0);
+    if (!ok) Serial.println("[GW] registerNode failed (may already be registered — continuing)");
+#else
+    (void)priv_32;
+    Serial.println("[GW] FLOW_ENABLED=0 — all Flow calls simulated locally");
+#endif
 }
 
 // ── Storacha upload ───────────────────────────────────────────────────────────
 bool gateway_storacha_upload(const char *csv_data, char *cid_out, size_t cid_out_size) {
 #if !FLOW_ENABLED
-    // Simulation: generate a plausible-looking fake CID
-    strlcpy(cid_out, "bafyreiSIMULATED000000000000000000", cid_out_size);
-    Serial.println("[GW] Storacha (simulated) — fake CID generated");
+    strlcpy(cid_out, "bafyreiSIMULATEDbafyreiSIMULATED0000000000", cid_out_size);
+    Serial.println("[GW] Storacha (simulated)");
     return true;
 #else
-    // Real path: POST multipart/form-data to STORACHA_UPLOAD_URL
-    // w3up expects a CAR file, but for demo we post raw bytes with a filename hint.
-    // Production implementation should construct a proper UnixFS CAR file.
     char resp[512] = {};
-    // Build minimal JSON body (w3up REST API)
-    char body[16384];
+    // Minimal multipart form — w3up REST /upload endpoint
+    // In production build a proper UnixFS CAR for deduplication.
+    static char body[16384];
     snprintf(body, sizeof(body),
-        "--boundary\r\n"
+        "--bndry\r\n"
         "Content-Disposition: form-data; name=\"file\"; filename=\"imu.csv\"\r\n"
         "Content-Type: text/csv\r\n\r\n%s\r\n"
-        "--boundary--\r\n",
+        "--bndry--\r\n",
         csv_data);
 
-    int code = _https_post("up.web3.storage", 443, "/upload",
-                           "multipart/form-data; boundary=boundary",
-                           body, resp, sizeof(resp));
-    if (code != 200 && code != 201) {
-        Serial.printf("[GW] Storacha upload failed: HTTP %d\n", code);
-        return false;
+    // Authorization header requires the w3up agent token — add manually if the
+    // WiFiClientSecure helper above gains auth support, or pass as extra header.
+    // For the hackathon demo the token is embedded as a build flag.
+    // TODO: add Authorization: Bearer STORACHA_AGENT_TOKEN header.
+    int code = _storacha_post("up.web3.storage", 443, "/upload",
+                               "multipart/form-data; boundary=bndry",
+                               body, resp, sizeof(resp));
+    if (code!=200&&code!=201) {
+        Serial.printf("[GW] Storacha upload HTTP %d\n", code); return false;
     }
     StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, resp) == DeserializationError::Ok) {
+    if (deserializeJson(doc, resp)==DeserializationError::Ok) {
         const char *cid = doc["cid"] | "";
         strlcpy(cid_out, cid, cid_out_size);
         Serial.printf("[GW] Storacha CID=%s\n", cid_out);
@@ -87,74 +113,80 @@ bool gateway_storacha_upload(const char *csv_data, char *cid_out, size_t cid_out
 #endif
 }
 
-// ── Flow: registerAnomaly ─────────────────────────────────────────────────────
+// ── Phase 1: registerAnomaly ──────────────────────────────────────────────────
 bool gateway_register_anomaly(
-    const char *transporter_pub_hex,
-    const char *submission_sig_hex,
+    const char  *transporter_pub_hex,
+    const char  *submission_sig_hex,
     float        anomaly_confidence,
     const char **quorum_ids,
     int          quorum_count,
     float        payment_per_auditor)
 {
 #if !FLOW_ENABLED
-    Serial.printf("[GW] (sim) registerAnomaly  event=%.16s...  quorum=%d  conf=%.4f\n",
-                  submission_sig_hex, quorum_count, anomaly_confidence);
+    Serial.printf("[GW] (sim) registerAnomaly  event=%.16s...  quorum=%d  "
+                  "conf=%.4f  bid/auditor=%.4f\n",
+                  submission_sig_hex, quorum_count,
+                  (double)anomaly_confidence, (double)payment_per_auditor);
     return true;
 #else
-    // Build Cadence transaction JSON.
-    // Flow REST API: POST /v1/transactions
-    // For the hackathon the deployer account holds the Gateway resource.
-    // The Pico signs the transaction envelope with its P-256 private key
-    // (Flow natively supports secp256r1 account keys).
-    //
-    // Full transaction construction is omitted here — it requires:
-    //   1. GET /v1/accounts/<addr> to fetch sequence number
-    //   2. Encode Cadence transaction envelope (RLP-like encoding)
-    //   3. Sign with Pico private key
-    //   4. POST /v1/transactions
-    //
-    // TODO: implement when deploying to testnet
-    Serial.println("[GW] Flow registerAnomaly — live submission not yet implemented");
-    return false;
+    return flow_tx_register_anomaly(
+        transporter_pub_hex, submission_sig_hex,
+        anomaly_confidence,
+        quorum_ids, quorum_count,
+        payment_per_auditor);
 #endif
 }
 
-// ── Flow: updateEventCid ──────────────────────────────────────────────────────
+// ── Phase 1.5: submitDeposit ──────────────────────────────────────────────────
+// Must be called and must succeed before the CSV is streamed to the auditor.
+// The deposit + bid are locked on-chain, creating an irrevocable commitment
+// that finalizeEvent uses for disbursement. If this TX fails, the auditor
+// gets a 503 and no data — preventing free-riding.
+bool gateway_submit_deposit(
+    const char *event_id,
+    const char *auditor_pub_hex,
+    float       deposit_amount,
+    float       bid_amount)
+{
+#if !FLOW_ENABLED
+    Serial.printf("[GW] (sim) submitDeposit  event=%.16s...  auditor=...%.12s  "
+                  "deposit=%.4f  bid=%.4f\n",
+                  event_id, auditor_pub_hex + strlen(auditor_pub_hex) - 12,
+                  (double)deposit_amount, (double)bid_amount);
+    return true;
+#else
+    return flow_tx_submit_deposit(event_id, auditor_pub_hex, deposit_amount, bid_amount);
+#endif
+}
+
+// ── Phase 3: finalizeEvent ────────────────────────────────────────────────────
+bool gateway_finalize_event(const char *event_id) {
+#if !FLOW_ENABLED
+    Serial.printf("[GW] (sim) finalizeEvent  event=%.16s...\n", event_id);
+    return true;
+#else
+    return flow_tx_finalize_event(event_id);
+#endif
+}
+
+// ── Post-consensus: updateEventCid ───────────────────────────────────────────
 bool gateway_update_event_cid(const char *event_id, const char *cid) {
 #if !FLOW_ENABLED
     Serial.printf("[GW] (sim) updateEventCid  event=%.16s...  cid=%s\n", event_id, cid);
     return true;
 #else
-    // TODO: same transaction construction as registerAnomaly
-    Serial.println("[GW] Flow updateEventCid — live submission not yet implemented");
-    return false;
+    return flow_tx_update_cid(event_id, cid);
 #endif
 }
 
-// ── Flow: getStake / getReputation ────────────────────────────────────────────
+// ── Read-only: queryNode ──────────────────────────────────────────────────────
+// No signing needed — runs a Cadence script via POST /v1/scripts.
+// Returns false on any error; caller uses 0.0 defaults (quorum ranks by price only).
 bool gateway_query_node(const char *pub_hex, float *stake_out, float *rep_out) {
-    *stake_out = 0.0f;
-    *rep_out   = 0.0f;
-
+    *stake_out = 0.0f; *rep_out = 0.0f;
 #if !FLOW_ENABLED
-    return true;   // caller will use 0.0 defaults — quorum ranks by price only
+    return true;
 #else
-    // POST to Flow REST script endpoint
-    // Script returns [Fix64?, Fix64] for [stake, reputation]
-    char script_b64[512]; // TODO: base64-encode the Cadence script
-    char arg_b64[512];    // TODO: base64-encode {"type":"String","value":"<pub_hex>"}
-    char body[1024];
-    snprintf(body, sizeof(body),
-        "{\"script\":\"%s\",\"arguments\":[\"%s\"]}",
-        script_b64, arg_b64);
-
-    char resp[512] = {};
-    int code = _https_post("rest-testnet.onflow.org", 443, "/v1/scripts",
-                           "application/json", body, resp, sizeof(resp));
-    if (code != 200) return false;
-
-    // Parse response — TODO: base64-decode value, parse Cadence JSON
-    // For now fall through to defaults
-    return false;
+    return flow_tx_query_node(pub_hex, stake_out, rep_out);
 #endif
 }

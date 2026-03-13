@@ -1,1 +1,4 @@
 .env
+PICOPART/.venv
+PICOPART/.pio
+PICOPART/.vscode
