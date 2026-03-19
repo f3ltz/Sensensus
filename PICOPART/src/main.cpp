@@ -168,7 +168,7 @@ void setup() {
         while (1) delay(1000);
     }
 
-    // ── TFLite (uncomment when model_data.cc is available) ───────────────────
+    // ── TFLite  ───────────────────────────────────────────────────────────────
     if (!infer_init(model_tflite, model_tflite_len)) {
         Serial.println("[WARN] TFLite init failed — inference disabled");
     }
@@ -188,6 +188,7 @@ void setup() {
 
     // ── Network ───────────────────────────────────────────────────────────────
     if (!net_init()) {
+        // Starts up 2 UDP ports, one for anomaly/beacon and one for bids, and an HTTP server for auditors to fetch CSV+payload
         Serial.println("[FATAL] Network init failed");
         while (1) delay(1000);
     }
@@ -214,7 +215,7 @@ void loop() {
 
         float conf = infer_run(window);
         if (conf < 0) {
-            // Model not loaded (Asrith's file missing) — skip
+            // Model not loaded — skip
         } else if (conf >= ANOMALY_CONFIDENCE_THRESHOLD) {
             _run_anomaly_cycle();
         }
