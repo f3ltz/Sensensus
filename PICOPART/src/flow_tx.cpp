@@ -526,14 +526,17 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
 
     if (!wait_seal) return true;
 
-    // Poll for seal with increased buffer size (FIXED)
+    // Poll for seal with HIGH-LATENCY timeout
     static char poll_path[128], poll_resp[4096];
-    snprintf(poll_path, sizeof(poll_path), "/v1/transactions/%s/results", tx_id_out);
+    
+    // THE ACTUALLY CORRECT URL PATH:
+    snprintf(poll_path, sizeof(poll_path), "/v1/transaction_results/%s", tx_id_out);
+    
     uint32_t start_time = millis();
-    const uint32_t timeout_ms = 150000; // INCREASED TO 150 SECONDS
+    const uint32_t timeout_ms = 150000; 
     
     while (millis() - start_time < timeout_ms) {
-        delay(5000); // Increased polling interval to avoid spamming the REST API
+        delay(5000); 
         int poll_code = _https_get(poll_path, poll_resp, sizeof(poll_resp));
         
         if (poll_code == 200) {
@@ -542,6 +545,7 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
             if (strstr(poll_resp,"\"FAILED\"")||strstr(poll_resp,"\"Failed\""))
                 { Serial.println("[FlowTx] ✗ FAILED"); return false; }
         } else {
+            // This will no longer print 404!
             Serial.printf("[FlowTx] Poll HTTP %d\n", poll_code);
         }
     }
