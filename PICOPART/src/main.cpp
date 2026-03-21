@@ -223,7 +223,7 @@ void loop() {
     }
 
     // ── 2. TFLite inference at 1 Hz ───────────────────────────────────────────
-    if (now - _lastInferMs >= 1000 && g_systemState == STATE_IDLE) {
+    if (now - _lastInferMs >= 1000 && g_systemState == STATE_IDLE && now > 15000) {
         _lastInferMs = now;
 
         float window[INPUT_TENSOR_SIZE];

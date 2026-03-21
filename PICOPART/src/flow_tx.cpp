@@ -324,9 +324,17 @@ static bool _get_seq_num(uint64_t *seq_out) {
     snprintf(path, sizeof(path), "/v1/accounts/0x%s?expand=keys", addr);
     int code = _https_get(path, rbuf, sizeof(rbuf));
     if (code != 200) { Serial.printf("[FlowTx] get_seq_num HTTP %d\n", code); return false; }
-    const char *p = strstr(rbuf, "\"sequence_number\":\"");
+    
+    // Find the key name
+    const char *p = strstr(rbuf, "\"sequence_number\"");
     if (!p) { Serial.println("[FlowTx] get_seq_num: field missing"); return false; }
-    p += 19;
+    
+    // Skip the string "sequence_number" (17 chars)
+    p += 17;
+    
+    // Skip any colons, spaces, or quote marks before the actual number
+    while (*p == ' ' || *p == ':' || *p == '"') p++;
+    
     *seq_out = (uint64_t)atoll(p);
     return true;
 }
@@ -395,15 +403,12 @@ static size_t _build_rlp_payload(const _tx_params *p, const uint8_t ref_id[32],
 
     // 9. authorizers list: [[addr_bytes]]
     {
-        static uint8_t ai[16], ao[32];
+        static uint8_t ai[16];
         size_t in  = _rlp_bytes(_account_raw, 8, ai, sizeof(ai));
-        size_t hni = _rlp_list_hdr(in, ao, sizeof(ao));
-        memcpy(ao+hni, ai, in);
-        size_t inner_len = hni+in;
-        size_t hno = _rlp_list_hdr(inner_len, stg+pos, sizeof(stg)-pos);
-        if (!hno) return 0;
-        pos += hno;
-        memcpy(stg+pos, ao, inner_len); pos += inner_len;
+        size_t hni = _rlp_list_hdr(in, stg+pos, sizeof(stg)-pos);
+        if (!hni) return 0;
+        pos += hni;
+        memcpy(stg+pos, ai, in); pos += in;
     }
 #undef W
 
@@ -513,10 +518,10 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
     static char ref_hex[65];
     for (int i=0; i<32; i++) snprintf(ref_hex+i*2, 3, "%02x", ref_id[i]);
 
-    // Canonical account address with 0x prefix
+    // Canonical account address WITHOUT 0x prefix (Required by Flow REST API)
     const char *raw = _account_addr;
     if (raw[0]=='0'&&raw[1]=='x') raw+=2;
-    static char addr0x[24]; snprintf(addr0x, sizeof(addr0x), "0x%s", raw);
+    static char addr_hex[24]; snprintf(addr_hex, sizeof(addr_hex), "%s", raw);
 
     // Build arguments JSON array
     static char args_arr[4096]; int ap=0;
@@ -550,8 +555,8 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
         "}]"
         "}",
         script_b64, args_arr, ref_hex,
-        addr0x, (unsigned long long)seq_num,
-        addr0x, addr0x, addr0x, sig_b64);
+        addr_hex, (unsigned long long)seq_num,
+        addr_hex, addr_hex, addr_hex, sig_b64);
 
     static char resp[1024];
     int code = _https_post("/v1/transactions", body, resp, sizeof(resp));
@@ -562,16 +567,24 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
     }
 
     // Extract tx ID
-    const char *idp = strstr(resp, "\"id\":\"");
+    const char *idp = strstr(resp, "\"id\"");
     if (!idp) { Serial.println("[FlowTx] no id in response"); return false; }
-    idp += 6; strncpy(tx_id_out, idp, 64); tx_id_out[64]='\0';
+    
+    // Skip past "id" and any colons, spaces, or quotes
+    idp += 4; 
+    while (*idp == ' ' || *idp == ':' || *idp == '"') idp++;
+    
+    // Flow transaction IDs are always exactly 64 hex characters
+    strncpy(tx_id_out, idp, 64); 
+    tx_id_out[64]='\0';
+    
     Serial.printf("[FlowTx] TX %s\n", tx_id_out);
     Serial.printf("[FlowTx]   https://testnet.flowscan.io/tx/%s\n", tx_id_out);
 
     if (!wait_seal) return true;
 
     // Poll for seal (max 60 s)
-    static char poll_path[128], poll_resp[512];
+    static char poll_path[128], poll_resp[4096];
     snprintf(poll_path, sizeof(poll_path), "/v1/transactions/%s/results", tx_id_out);
     uint32_t deadline = millis()+60000;
     while (millis()<deadline) {

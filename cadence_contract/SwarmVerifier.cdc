@@ -27,9 +27,6 @@ access(all) contract SwarmVerifierV3 {
     access(all) let verdictTimeoutSecs: UFix64   //  60.0  force-finalize window
     access(all) let depositPerAuditor:  UFix64   //   0.5  commitment bond per job
 
-    access(all) let GatewayStoragePath: StoragePath
-    access(all) let GatewayPublicPath:  PublicPath
-
     access(all) var networkAgents: {String: AgentRecord}
     access(all) var pendingEvents: {String: PendingEvent}
     access(all) var anomalyLedger: {String: AnomalyEvent}
@@ -213,85 +210,81 @@ access(all) contract SwarmVerifierV3 {
     access(all) event AgentBlacklisted(nodeId: String, reputation: Fix64, stakedFlow: UFix64)
     access(all) event EventCidUpdated(eventId: String, cid: String)
 
-    // ── Gateway resource ──────────────────────────────────────────────────────
+    // ── Phase 1: registerAnomaly ──────────────────────────────────────────────
 
-    access(all) resource Gateway {
-
-        // Phase 1: lock sum(bidPrices) from transporter stake
-        access(all) fun registerAnomaly(
-            transporterId: String, submissionSig: String,
-            anomalyConfidence: UFix64, quorumIds: [String], bidPrices: [UFix64]
-        ) {
-            pre {
-                quorumIds.length > 0:                                    "Empty quorum"
-                quorumIds.length == bidPrices.length:                    "Parallel array length mismatch"
-                anomalyConfidence >= 0.0 && anomalyConfidence <= 1.0:   "Confidence out of range"
-                SwarmVerifierV3.networkAgents[transporterId] != nil:     "Transporter not registered"
-                !SwarmVerifierV3.networkAgents[transporterId]!.isBlacklisted: "Transporter blacklisted"
-                SwarmVerifierV3.pendingEvents[submissionSig] == nil:     "Duplicate submissionSig"
-                SwarmVerifierV3.anomalyLedger[submissionSig] == nil:     "Event already finalized"
-            }
-
-            var bidMap: {String: UFix64} = {}
-            var totalBidEscrow: UFix64 = 0.0
-            var i = 0
-            while i < quorumIds.length {
-                bidMap[quorumIds[i]] = bidPrices[i]
-                totalBidEscrow = totalBidEscrow + bidPrices[i]
-                i = i + 1
-            }
-
-            var transporter = SwarmVerifierV3.networkAgents[transporterId]!
-            transporter.lockEscrow(amount: totalBidEscrow)
-            SwarmVerifierV3.networkAgents[transporterId] = transporter
-
-            SwarmVerifierV3.pendingEvents[submissionSig] = PendingEvent(
-                transporterId: transporterId, submissionSig: submissionSig,
-                anomalyConfidence: anomalyConfidence, quorumIds: quorumIds, bidPrices: bidMap
-            )
-
-            emit AnomalyRegistered(eventId: submissionSig, transporterId: transporterId,
-                anomalyConf: anomalyConfidence, quorumSize: quorumIds.length,
-                totalBidEscrow: totalBidEscrow)
+    access(all) fun registerAnomaly(
+        transporterId: String, submissionSig: String,
+        anomalyConfidence: UFix64, quorumIds: [String], bidPrices: [UFix64]
+    ) {
+        pre {
+            quorumIds.length > 0:                                    "Empty quorum"
+            quorumIds.length == bidPrices.length:                    "Parallel array length mismatch"
+            anomalyConfidence >= 0.0 && anomalyConfidence <= 1.0:   "Confidence out of range"
+            SwarmVerifierV3.networkAgents[transporterId] != nil:     "Transporter not registered"
+            !SwarmVerifierV3.networkAgents[transporterId]!.isBlacklisted: "Transporter blacklisted"
+            SwarmVerifierV3.pendingEvents[submissionSig] == nil:     "Duplicate submissionSig"
+            SwarmVerifierV3.anomalyLedger[submissionSig] == nil:     "Event already finalized"
         }
 
-        // Phase 1.5: lock depositPerAuditor from auditor stake.
-        // Called by Pico after nonce sig verified at POST /pay.
-        // CSV only streamed after this TX seals.
-        access(all) fun recordDeposit(eventId: String, auditorId: String) {
-            pre {
-                SwarmVerifierV3.pendingEvents[eventId] != nil:               "Event not found"
-                !SwarmVerifierV3.pendingEvents[eventId]!.finalized:          "Event finalized"
-                SwarmVerifierV3.networkAgents[auditorId] != nil:             "Auditor not registered"
-                !SwarmVerifierV3.networkAgents[auditorId]!.isBlacklisted:    "Auditor blacklisted"
-                SwarmVerifierV3.pendingEvents[eventId]!.deposits[auditorId] == nil: "Deposit already recorded"
-                SwarmVerifierV3.pendingEvents[eventId]!.bidPrices[auditorId] != nil: "Auditor not in quorum"
-            }
-
-            let amount = SwarmVerifierV3.depositPerAuditor
-
-            var auditor = SwarmVerifierV3.networkAgents[auditorId]!
-            auditor.lockEscrow(amount: amount)
-            SwarmVerifierV3.networkAgents[auditorId] = auditor
-
-            var ev = SwarmVerifierV3.pendingEvents[eventId]!
-            ev.recordDeposit(auditorId: auditorId, amount: amount)
-            SwarmVerifierV3.pendingEvents[eventId] = ev
-
-            emit DepositRecorded(eventId: eventId, auditorId: auditorId, amount: amount)
+        var bidMap: {String: UFix64} = {}
+        var totalBidEscrow: UFix64 = 0.0
+        var i = 0
+        while i < quorumIds.length {
+            bidMap[quorumIds[i]] = bidPrices[i]
+            totalBidEscrow = totalBidEscrow + bidPrices[i]
+            i = i + 1
         }
 
-        // Post-consensus: record Storacha CID
-        access(all) fun updateEventCid(eventId: String, cid: String) {
-            pre {
-                SwarmVerifierV3.anomalyLedger[eventId] != nil: "Event not finalized"
-                cid.length > 0: "Empty CID"
-            }
-            var ev = SwarmVerifierV3.anomalyLedger[eventId]!
-            ev.setCid(cid: cid)
-            SwarmVerifierV3.anomalyLedger[eventId] = ev
-            emit EventCidUpdated(eventId: eventId, cid: cid)
+        var transporter = SwarmVerifierV3.networkAgents[transporterId]!
+        transporter.lockEscrow(amount: totalBidEscrow)
+        SwarmVerifierV3.networkAgents[transporterId] = transporter
+
+        SwarmVerifierV3.pendingEvents[submissionSig] = PendingEvent(
+            transporterId: transporterId, submissionSig: submissionSig,
+            anomalyConfidence: anomalyConfidence, quorumIds: quorumIds, bidPrices: bidMap
+        )
+
+        emit AnomalyRegistered(eventId: submissionSig, transporterId: transporterId,
+             anomalyConf: anomalyConfidence, quorumSize: quorumIds.length,
+             totalBidEscrow: totalBidEscrow)
+    }
+
+    // ── Phase 1.5: recordDeposit ──────────────────────────────────────────────
+
+    access(all) fun recordDeposit(eventId: String, auditorId: String) {
+        pre {
+            SwarmVerifierV3.pendingEvents[eventId] != nil:               "Event not found"
+            !SwarmVerifierV3.pendingEvents[eventId]!.finalized:          "Event finalized"
+            SwarmVerifierV3.networkAgents[auditorId] != nil:             "Auditor not registered"
+            !SwarmVerifierV3.networkAgents[auditorId]!.isBlacklisted:    "Auditor blacklisted"
+            SwarmVerifierV3.pendingEvents[eventId]!.deposits[auditorId] == nil: "Deposit already recorded"
+            SwarmVerifierV3.pendingEvents[eventId]!.bidPrices[auditorId] != nil: "Auditor not in quorum"
         }
+
+        let amount = SwarmVerifierV3.depositPerAuditor
+
+        var auditor = SwarmVerifierV3.networkAgents[auditorId]!
+        auditor.lockEscrow(amount: amount)
+        SwarmVerifierV3.networkAgents[auditorId] = auditor
+
+        var ev = SwarmVerifierV3.pendingEvents[eventId]!
+        ev.recordDeposit(auditorId: auditorId, amount: amount)
+        SwarmVerifierV3.pendingEvents[eventId] = ev
+
+        emit DepositRecorded(eventId: eventId, auditorId: auditorId, amount: amount)
+    }
+
+    // ── Post-consensus: updateEventCid ────────────────────────────────────────
+
+    access(all) fun updateEventCid(eventId: String, cid: String) {
+        pre {
+            SwarmVerifierV3.anomalyLedger[eventId] != nil: "Event not finalized"
+            cid.length > 0: "Empty CID"
+        }
+        var ev = SwarmVerifierV3.anomalyLedger[eventId]!
+        ev.setCid(cid: cid)
+        SwarmVerifierV3.anomalyLedger[eventId] = ev
+        emit EventCidUpdated(eventId: eventId, cid: cid)
     }
 
     // ── Phase 2: submitVerdict ────────────────────────────────────────────────
@@ -454,10 +447,10 @@ access(all) contract SwarmVerifierV3 {
 
     // ── Read-only helpers ─────────────────────────────────────────────────────
 
-    access(all) fun getReputation(nodeId: String): Fix64?  { return self.networkAgents[nodeId]?.reputation }
-    access(all) fun getStake(nodeId: String):      UFix64? { return self.networkAgents[nodeId]?.stakedFlow }
-    access(all) fun isBlacklisted(nodeId: String): Bool    { return self.networkAgents[nodeId]?.isBlacklisted ?? false }
-    access(all) fun getDepositAmount():            UFix64  { return self.depositPerAuditor }
+    access(all) fun getReputation(nodeId: String): Fix64?      { return self.networkAgents[nodeId]?.reputation }
+    access(all) fun getStake(nodeId: String):      UFix64?     { return self.networkAgents[nodeId]?.stakedFlow }
+    access(all) fun isBlacklisted(nodeId: String): Bool        { return self.networkAgents[nodeId]?.isBlacklisted ?? false }
+    access(all) fun getDepositAmount():            UFix64      { return self.depositPerAuditor }
     access(all) fun getAnomalyEvent(eventId: String): AnomalyEvent? { return self.anomalyLedger[eventId] }
     access(all) fun getPendingEvent(eventId: String): PendingEvent? { return self.pendingEvents[eventId] }
 
@@ -501,8 +494,5 @@ access(all) contract SwarmVerifierV3 {
         self.alpha = 10.0; self.beta = 5.0; self.blacklistThreshold = -50.0
         self.minimumStake = 10.0; self.verdictTimeoutSecs = 60.0; self.depositPerAuditor = 0.5
         self.networkAgents = {}; self.pendingEvents = {}; self.anomalyLedger = {}
-        self.GatewayStoragePath = /storage/SwarmGatewayV2
-        self.GatewayPublicPath  = /public/SwarmGatewayV2
-        self.account.storage.save(<- create Gateway(), to: self.GatewayStoragePath)
     }
 }
