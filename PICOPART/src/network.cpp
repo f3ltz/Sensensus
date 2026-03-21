@@ -118,7 +118,13 @@ static void _handle_beacon(const uint8_t *pkt, const char *src_ip) {
 
 // ── PKT_BID handler (0x02, 137 bytes) ────────────────────────────────────────
 static void _handle_bid(const uint8_t *pkt, const char *src_ip) {
-    if (!g_collectingBids) return;
+    Serial.printf("[UDP] _handle_bid called from %s collecting=%d\n", 
+                  src_ip, g_collectingBids);  // add this
+    
+    if (!g_collectingBids) {
+        Serial.println("[UDP] Bid dropped — not collecting");  // add this
+        return;
+    }
 
     const uint8_t *pub        = pkt + 1;   // 64 bytes
     const uint8_t *price_bytes = pkt + 65; // 8 bytes float64 LE
@@ -132,18 +138,26 @@ static void _handle_bid(const uint8_t *pkt, const char *src_ip) {
 
     char pub_hex[PUBKEY_HEX_LEN + 1];
     bytes_to_hex(pub, PUBKEY_BYTES, pub_hex);
+    Serial.printf("[UDP] Bid sig OK from %s pub=...%s\n", 
+                  src_ip, pub_hex + PUBKEY_HEX_LEN - 12);  // add this
 
     // Must have registered via beacon first
     if (!_pubhex_in_registry(pub_hex)) {
-        Serial.printf("[UDP] Bid from unregistered %s — dropped\n", src_ip);
+        Serial.printf("[UDP] Registry has %d entries\n", g_auditorCount);  // add this
         return;
     }
 
     // Deduplicate per auditor
-    for (int i = 0; i < g_bidCount; i++)
-        if (strcmp(g_bidPool[i].pubkey_hex, pub_hex) == 0) return;
-
-    if (g_bidCount >= MAX_AUDITORS) return;
+    for (int i = 0; i < g_bidCount; i++){
+        if (strcmp(g_bidPool[i].pubkey_hex, pub_hex) == 0){
+            Serial.println("[UDP] Duplicate bid — dropped");
+            return;
+        } 
+    }    
+    if (g_bidCount >= MAX_AUDITORS) {
+        Serial.println("[UDP] Bid pool full");  // add this
+        return;
+    }
 
     double price;
     memcpy(&price, price_bytes, 8);   // little-endian float64
@@ -156,7 +170,8 @@ static void _handle_bid(const uint8_t *pkt, const char *src_ip) {
     b.stake = 0.0f;
     b.score = 0.0f;
 
-    Serial.printf("[UDP] Bid OK  %s  price=%.4f FLOW\n", src_ip, price);
+    Serial.printf("[UDP] Bid OK  %s  price=%.4f FLOW  bidCount=%d\n", 
+                  src_ip, price, g_bidCount);
 }
 
 // ── UDP poll ──────────────────────────────────────────────────────────────────
@@ -176,14 +191,19 @@ void net_handleUdp() {
     // ── Unicast bid socket (port 5006)
     sz = _bidSock.parsePacket();
     if (sz > 0) {
+        Serial.printf("[UDP] Bid socket got %d bytes\n", sz);
         uint8_t pkt[256];
         int n = _bidSock.read(pkt, sizeof(pkt));
         char src[20];
         _bidSock.remoteIP().toString().toCharArray(src, sizeof(src));
 
+        Serial.printf("[UDP] Bid packet: n=%d type=0x%02x from=%s\n", 
+                  n, pkt[0], src);  // add this
+
         if (n == 137 && pkt[0] == 0x02) _handle_bid(pkt, src);
+        else Serial.printf("[UDP] Bid ignored: wrong size or type\n");  // add this
+        }
     }
-}
 
 // ── PKT_ANOMALY builder and broadcast ─────────────────────────────────────────
 // PKT_ANOMALY (133 bytes): [0x03 | pub 64B | conf float32 LE 4B | sig 64B]
@@ -286,6 +306,7 @@ static void _handle_GET_data(WiFiClient &cli, const char *query) {
         return;
     }
     pk_start += 7;
+    Serial.printf("[HTTP] pubkey_len=%d expected=%d\n", (int)strlen(pk_start), PUBKEY_HEX_LEN);  // add this
     if (strlen(pk_start) < PUBKEY_HEX_LEN) {
         _http_send(cli, 400, "application/json", "{\"error\":\"pubkey too short\"}");
         return;
@@ -365,8 +386,7 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     // Invalidate nonce (replay prevention)
     ne->valid = false;
 
-    // Build payload_signature: sign canonical JSON over event metadata
-    // Canonical: {"transporter_pubkey":...,"auditor_pubkey":...,"anomaly_confidence":...,"timestamp_ms":...,"event_id":...}
+    // Build canonical JSON for payload signature
     char canonical[512];
     snprintf(canonical, sizeof(canonical),
         "{\"anomaly_confidence\":%.4f,\"auditor_pubkey\":\"%s\","
@@ -378,16 +398,14 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     char payload_sig_hex[SIG_BYTES * 2 + 1];
     bytes_to_hex(payload_sig, SIG_BYTES, payload_sig_hex);
 
-    // Store issued payload sig for later verdict verification
+    // Store issued payload sig
     if (_issuedCount < MAX_QUORUM) {
         strlcpy(_issuedPayloadSigs[_issuedCount], pub_hex, sizeof(_issuedPayloadSigs[0]));
         strlcpy(_issuedPayloadSigVal[_issuedCount], payload_sig_hex, sizeof(_issuedPayloadSigVal[0]));
         _issuedCount++;
     }
 
-    // Build response JSON
-    // Note: response body can be large (CSV ~6KB + payload JSON)
-    // We send payload first, then stream CSV to avoid double-buffering
+    // Build payload JSON
     char payload_json[768];
     snprintf(payload_json, sizeof(payload_json),
         "{\"transporter_pubkey\":\"%s\","
@@ -399,21 +417,30 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
         g_pubHex, pub_hex, g_lastConfidence,
         (unsigned long)millis(), g_currentEventId, payload_sig_hex);
 
-    // Stream response — avoid a 8KB static buffer by writing in parts
-    size_t csv_len    = strlen(g_csvBuffer);
+    // Count escaped CSV length (\n becomes \\n = 2 bytes)
+    size_t csv_escaped_len = 0;
+    const char *p = g_csvBuffer;
+    while (*p) {
+        csv_escaped_len += (*p == '\n') ? 2 : 1;
+        p++;
+    }
+
+    // Total body: {"csv":"<escaped>","payload":<payload_json>}
+    // {"csv":"    = 8 chars
+    // ","payload": = 12 chars
+    // }            = 1 char
     size_t payload_len = strlen(payload_json);
-    // Build full body: {"csv":"<escaped>","payload":{...}}
-    // For simplicity the CSV doesn't need JSON escaping (only commas and dots)
-    int header_len = snprintf(nullptr, 0, "{\"csv\":\"%s\",\"payload\":%s}", g_csvBuffer, payload_json);
+    int total_len = 8 + (int)csv_escaped_len + 12 + (int)payload_len + 1;
 
     cli.printf("HTTP/1.0 200 OK\r\n");
     cli.printf("Content-Type: application/json\r\n");
-    cli.printf("Content-Length: %d\r\n", header_len);
+    cli.printf("Content-Length: %d\r\n", total_len);
     cli.printf("Access-Control-Allow-Origin: *\r\n");
     cli.printf("Connection: close\r\n\r\n");
+
+    // Stream body in parts to avoid large buffer
     cli.printf("{\"csv\":\"");
-    // Stream CSV with newlines escaped as \\n
-    const char *p = g_csvBuffer;
+    p = g_csvBuffer;
     while (*p) {
         if (*p == '\n') cli.print("\\n");
         else            cli.write(*p);
@@ -457,9 +484,11 @@ void net_handleHttp() {
     }
 
     // Parse method and path
-    char method[8], path[128], query[256];
+    char method[8], path[256], query[256];
     query[0] = '\0';
-    sscanf(req_line.c_str(), "%7s %127s", method, path);
+    sscanf(req_line.c_str(), "%7s %255s", method, path);
+    Serial.printf("[HTTP] method=%s path=%s\n", method, path);  // add this
+    Serial.printf("[HTTP] query=%s len=%d\n", query, (int)strlen(query));  // add this
 
     // Split path?query
     char *qmark = strchr(path, '?');

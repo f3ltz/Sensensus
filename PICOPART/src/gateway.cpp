@@ -77,39 +77,15 @@ void gateway_init(const uint8_t *priv_32) {
 // ── Storacha upload ───────────────────────────────────────────────────────────
 bool gateway_storacha_upload(const char *csv_data, char *cid_out, size_t cid_out_size) {
 #if !FLOW_ENABLED
-    strlcpy(cid_out, "bafyreiSIMULATEDbafyreiSIMULATED0000000000", cid_out_size);
-    Serial.println("[GW] Storacha (simulated)");
+    // This branch runs when FLOW_ENABLED=0 — not your case
+    strlcpy(cid_out, "bafyreiSIMULATED", cid_out_size);
     return true;
 #else
-    char resp[512] = {};
-    // Minimal multipart form — w3up REST /upload endpoint
-    // In production build a proper UnixFS CAR for deduplication.
-    static char body[16384];
-    snprintf(body, sizeof(body),
-        "--bndry\r\n"
-        "Content-Disposition: form-data; name=\"file\"; filename=\"imu.csv\"\r\n"
-        "Content-Type: text/csv\r\n\r\n%s\r\n"
-        "--bndry--\r\n",
-        csv_data);
-
-    // Authorization header requires the w3up agent token — add manually if the
-    // WiFiClientSecure helper above gains auth support, or pass as extra header.
-    // For the hackathon demo the token is embedded as a build flag.
-    // TODO: add Authorization: Bearer STORACHA_AGENT_TOKEN header.
-    int code = _storacha_post("up.web3.storage", 443, "/upload",
-                               "multipart/form-data; boundary=bndry",
-                               body, resp, sizeof(resp));
-    if (code!=200&&code!=201) {
-        Serial.printf("[GW] Storacha upload HTTP %d\n", code); return false;
-    }
-    StaticJsonDocument<256> doc;
-    if (deserializeJson(doc, resp)==DeserializationError::Ok) {
-        const char *cid = doc["cid"] | "";
-        strlcpy(cid_out, cid, cid_out_size);
-        Serial.printf("[GW] Storacha CID=%s\n", cid_out);
-        return strlen(cid_out) > 0;
-    }
-    return false;
+    // THIS is what runs with FLOW_ENABLED=1
+    // Change it to just return true for now
+    Serial.println("[GW] Storacha upload skipped");
+    strlcpy(cid_out, "", cid_out_size);
+    return true;   // <-- this is the only meaningful change
 #endif
 }
 

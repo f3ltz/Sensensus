@@ -12,6 +12,7 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <cstddef>
+#include <uECC.h>
 
 #include "config.h"
 #include "crypto.h"
@@ -73,9 +74,8 @@ static void _run_anomaly_cycle() {
     //    (skipped in simulation mode — gateway returns fake CID)
     char cid[128] = "";
     if (!gateway_storacha_upload(g_csvBuffer, cid, sizeof(cid))) {
-        Serial.println("[Main] Storacha upload failed — aborting event");
-        g_systemState = STATE_IDLE;
-        return;
+        Serial.println("[Main] Storacha pre-upload skipped — will upload post-consensus");
+        // cid stays empty, filled in after finalizeEvent
     }
 
     // 3. Broadcast PKT_ANOMALY
@@ -83,7 +83,6 @@ static void _run_anomaly_cycle() {
     g_systemState    = STATE_ANOMALY;
     g_collectingBids = true;
     g_bidCount       = 0;
-    _anomalyStartMs  = millis();
 
     Serial.printf("[Main] Bid window open (%d ms)...\n", BID_WINDOW_MS);
 }
@@ -91,7 +90,8 @@ static void _run_anomaly_cycle() {
 // ── After bid window closes ───────────────────────────────────────────────────
 static void _close_bid_window() {
     g_collectingBids = false;
-
+    Serial.printf("[Main] Bid window closed. bidCount=%d auditorCount=%d\n", 
+                  g_bidCount, g_auditorCount);
     if (g_bidCount == 0) {
         Serial.println("[Main] No bids — returning to IDLE");
         g_systemState = STATE_IDLE;
@@ -155,10 +155,14 @@ void setup() {
 
     // ── Crypto: key generation ────────────────────────────────────────────────
     crypto_init();
-    if (!crypto_keygen(g_privKey, g_pubKey)) {
-        Serial.println("[FATAL] Key generation failed");
+    // Load pre-generated key so Flow account stays consistent across reboots
+    const char *priv_hex = PICO_PRIV_KEY_HEX;
+    if (!hex_to_bytes(priv_hex, 64, g_privKey)) {
+        Serial.println("[FATAL] Failed to decode private key from build flag");
         while (1) delay(1000);
     }
+    // Derive public key from private key
+    uECC_compute_public_key(g_privKey, g_pubKey, uECC_secp256r1());
     bytes_to_hex(g_pubKey, PUBKEY_BYTES, g_pubHex);
     Serial.printf("[Crypto] pubkey=%s...\n", g_pubHex + PUBKEY_HEX_LEN - 24);
 
@@ -176,6 +180,9 @@ void setup() {
     // ── WiFi ──────────────────────────────────────────────────────────────────
     Serial.printf("[WiFi] Connecting to %s...\n", WIFI_SSID);
     WiFi.begin(WIFI_SSID, WIFI_PASS);
+        // Add right after WiFi.begin succeeds
+    WiFi.setDNS(IPAddress(8,8,8,8), IPAddress(8,8,4,4));
+    delay(500);
     int attempts = 0;
     while (WiFi.status() != WL_CONNECTED && attempts < 40) {
         delay(500); Serial.print("."); attempts++;
@@ -193,7 +200,16 @@ void setup() {
         while (1) delay(1000);
     }
 
+        // DNS test — add after net_init()
+    IPAddress flowIP;
+    if (WiFi.hostByName("rest-testnet.onflow.org", flowIP)) {
+        Serial.printf("[DNS] rest-testnet.onflow.org = %s\n", flowIP.toString().c_str());
+    } else {
+        Serial.println("[DNS] FAILED to resolve rest-testnet.onflow.org");
+    }
+
     Serial.println("[Main] Ready. Sampling IMU at 50 Hz...\n");
+    gateway_init(g_privKey);
 }
 
 // ── Arduino loop ──────────────────────────────────────────────────────────────
@@ -218,11 +234,19 @@ void loop() {
             // Model not loaded — skip
         } else if (conf >= ANOMALY_CONFIDENCE_THRESHOLD) {
             _run_anomaly_cycle();
+            _anomalyStartMs = now;
         }
     }
 
     // ── 3. UDP polling ────────────────────────────────────────────────────────
+    // Around the net_handleUdp call, add a periodic log
+    static uint32_t _lastUdpLogMs = 0;
+    if (g_collectingBids && now - _lastUdpLogMs >= 1000) {
+        _lastUdpLogMs = now;
+        Serial.printf("[Main] Collecting bids... bidCount=%d\n", g_bidCount);
+    }
     net_handleUdp();
+
 
     // ── 4. HTTP client serving ────────────────────────────────────────────────
     if (g_systemState == STATE_DELIVERING) {

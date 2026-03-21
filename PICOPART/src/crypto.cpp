@@ -19,9 +19,9 @@ void crypto_init() {
     uECC_set_rng(_uECC_rng);
 }
 
-bool crypto_keygen(uint8_t *priv_out, uint8_t *pub_out) {
-    return uECC_make_key(pub_out, priv_out, uECC_secp256r1()) == 1;
-}
+// bool crypto_keygen(uint8_t *priv_out, uint8_t *pub_out) {
+//     return uECC_make_key(pub_out, priv_out, uECC_secp256r1()) == 1;
+// }
 
 bool crypto_sign(const uint8_t *priv, const uint8_t *msg, size_t msg_len,
                  uint8_t *sig_out) {

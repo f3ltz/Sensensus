@@ -203,7 +203,7 @@ class AuditorNode:
         if self.flow_enabled:
             self._register_on_flow()
 
-        print(f"[*] Auditor ready. pubkey={self.pub_hex[:16]}...")
+        print(f"[*] Auditor ready. pubkey={self.pub_hex[12:]}...")
         print(f"[*] Bid price:   {self.bid_price} FLOW")
         print(f"[*] Deposit:     {self.deposit_amount} FLOW")
         print(f"[*] Flow submit: {'ENABLED → testnet' if self.flow_enabled else 'DISABLED (mock /verdict)'}")
@@ -358,11 +358,14 @@ class AuditorNode:
         header   = bytes([0x02]) + self.pub_bytes + struct.pack('<d', self.bid_price)
         sig      = self._sign(header)
         packet   = header + sig
-        assert len(packet) == 137, f"Bid packet wrong length: {len(packet)}"
+        assert len(packet) == 137
 
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.sendto(packet, (transporter_ip, BID_PORT))
+            # Send 3 times to handle UDP drop
+            for attempt in range(3):
+                sock.sendto(packet, (transporter_ip, BID_PORT))
+                time.sleep(0.3)
             sock.close()
             print(f"[Bid] Sent {self.bid_price} FLOW bid to {transporter_ip}:{BID_PORT}")
         except Exception as e:
@@ -654,8 +657,8 @@ class AuditorNode:
         asyncio.run(self._submit_to_flow_async(body))
 
     async def _submit_to_flow_async(self, body: dict):
-        flow_addr = os.environ.get("TESTNET_ADDRESS", "")
-        flow_key  = os.environ.get("PRIVATE_KEY",  "")
+        flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "")
+        flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "")
 
         if not flow_addr or not flow_key:
             print("[Flow] FLOW_ACCOUNT_ADDR or FLOW_ACCOUNT_KEY not set — falling back to mock.")

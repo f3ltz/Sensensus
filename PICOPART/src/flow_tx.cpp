@@ -209,38 +209,56 @@ static size_t _b64_dec(const char *in, size_t ilen, uint8_t *out, size_t ocap) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 static int _https_get(const char *path, char *rbuf, size_t rcap) {
-    WiFiClientSecure cli; cli.setInsecure();
+    WiFiClientSecure cli; 
+    cli.setInsecure();
+    cli.setTimeout(15);
     if (!cli.connect(_api_host, 443)) {
         Serial.printf("[FlowTx] GET connect failed → %s\n", _api_host); return -1;
     }
-    cli.printf("GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", path, _api_host);
-    uint32_t dl = millis()+12000;
+    cli.printf("GET %s HTTP/1.1\r\nHost: %s\r\nAccept: application/json\r\nConnection: close\r\n\r\n", 
+               path, _api_host);
+    uint32_t dl = millis()+15000;
     while (!cli.available() && millis()<dl) delay(10);
     String sl = cli.readStringUntil('\n'); int code=0;
     sscanf(sl.c_str(), "HTTP/%*s %d", &code);
-    while (cli.connected()||cli.available()) { String h=cli.readStringUntil('\n'); if (h=="\r"||!h.length()) break; }
+    while (cli.connected()||cli.available()) { 
+        String h=cli.readStringUntil('\n'); 
+        if (h=="\r"||!h.length()) break; 
+    }
     size_t n=0;
-    while ((cli.connected()||cli.available())&&n<rcap-1) { if (cli.available()) rbuf[n++]=cli.read(); }
+    while ((cli.connected()||cli.available())&&n<rcap-1) { 
+        if (cli.available()) rbuf[n++]=cli.read(); 
+        else delay(1);
+    }
     rbuf[n]='\0'; cli.stop(); return code;
 }
 
 static int _https_post(const char *path, const char *body,
                        char *rbuf, size_t rcap) {
-    WiFiClientSecure cli; cli.setInsecure();
+    WiFiClientSecure cli; 
+    cli.setInsecure();
+    cli.setTimeout(15);
     if (!cli.connect(_api_host, 443)) {
         Serial.printf("[FlowTx] POST connect failed → %s\n", _api_host); return -1;
     }
-    cli.printf("POST %s HTTP/1.0\r\nHost: %s\r\n"
+    Serial.printf("[FlowTx] TLS connected to %s\n", _api_host);
+    cli.printf("POST %s HTTP/1.1\r\nHost: %s\r\n"
                "Content-Type: application/json\r\nContent-Length: %d\r\n"
-               "Connection: close\r\n\r\n%s",
+               "Accept: application/json\r\nConnection: close\r\n\r\n%s",
                path, _api_host, (int)strlen(body), body);
-    uint32_t dl = millis()+12000;
+    uint32_t dl = millis()+15000;
     while (!cli.available()&&millis()<dl) delay(10);
     String sl = cli.readStringUntil('\n'); int code=0;
     sscanf(sl.c_str(), "HTTP/%*s %d", &code);
-    while (cli.connected()||cli.available()) { String h=cli.readStringUntil('\n'); if (h=="\r"||!h.length()) break; }
+    while (cli.connected()||cli.available()) { 
+        String h=cli.readStringUntil('\n'); 
+        if (h=="\r"||!h.length()) break; 
+    }
     size_t n=0;
-    while ((cli.connected()||cli.available())&&n<rcap-1) { if (cli.available()) rbuf[n++]=cli.read(); }
+    while ((cli.connected()||cli.available())&&n<rcap-1) { 
+        if (cli.available()) rbuf[n++]=cli.read(); 
+        else delay(1);
+    }
     rbuf[n]='\0'; cli.stop(); return code;
 }
 
@@ -267,18 +285,40 @@ static bool _hex_to_bytes(const char *hex, size_t hlen, uint8_t *out) {
 // §6  Flow REST helpers — fetch reference block ID and sequence number
 // ═════════════════════════════════════════════════════════════════════════════
 static bool _get_ref_block(uint8_t ref_id[32]) {
-    static char rbuf[1024];
+    static char rbuf[4096];
     int code = _https_get("/v1/blocks?height=sealed", rbuf, sizeof(rbuf));
-    if (code != 200) { Serial.printf("[FlowTx] get_ref_block HTTP %d\n", code); return false; }
-    const char *p = strstr(rbuf, "\"id\":\"");
-    if (!p) { Serial.println("[FlowTx] get_ref_block: no id field"); return false; }
-    p += 6;
-    if (strlen(p) < 64) { Serial.println("[FlowTx] get_ref_block: id too short"); return false; }
+    if (code != 200) { 
+        Serial.printf("[FlowTx] get_ref_block HTTP %d\n", code); 
+        return false; 
+    }
+
+    // Response has "id": "hexstring" with a space after colon
+    // Look for the id field inside "header" object
+    const char *header = strstr(rbuf, "\"header\"");
+    if (!header) {
+        Serial.println("[FlowTx] no header field");
+        return false;
+    }
+    // Find "id" after the header marker
+    const char *p = strstr(header, "\"id\"");
+    if (!p) {
+        Serial.println("[FlowTx] no id field");
+        return false;
+    }
+    // Skip past "id" then skip : and any spaces/quotes
+    p += 4;  // skip "id"
+    while (*p == ' ' || *p == ':' || *p == '"') p++;
+
+    if (strlen(p) < 64) {
+        Serial.printf("[FlowTx] id too short: %d\n", (int)strlen(p));
+        return false;
+    }
+    Serial.printf("[FlowTx] ref block id=%.16s...\n", p);
     return _hex_to_bytes(p, 64, ref_id);
 }
 
 static bool _get_seq_num(uint64_t *seq_out) {
-    static char path[80], rbuf[2048];
+    static char path[80], rbuf[4096];
     const char *addr = _account_addr;
     if (addr[0]=='0'&&addr[1]=='x') addr+=2;
     snprintf(path, sizeof(path), "/v1/accounts/0x%s?expand=keys", addr);

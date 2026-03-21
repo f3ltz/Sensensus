@@ -93,7 +93,7 @@ access(all) contract SwarmVerifierV3 {
             self.confidence = confidence; self.payloadSignature = payloadSignature
             self.verdictSignature = verdictSignature
             self.submittedAt = getCurrentBlock().timestamp
-        }
+        }   
     }
 
     // ── PendingEvent ──────────────────────────────────────────────────────────
