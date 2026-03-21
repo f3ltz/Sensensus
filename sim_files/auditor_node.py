@@ -19,7 +19,7 @@ Protocol flow:
            failed — abort rather than retrying (prevents double-lock).
   5. Run Random Forest model on last 50 rows of CSV (shape 50×7)
   6. Submit signed verdict:
-       • flow_enabled=True  → SwarmVerifierV3.submitVerdict() on testnet
+       • flow_enabled=True  → SwarmVerifierV4.submitVerdict() on testnet
        • flow_enabled=False → POST /verdict to mock_transporter
 
 Packet formats (must match config.h):
@@ -94,17 +94,17 @@ FLOW_CONTRACT_ADDR_DEFAULT = "0xfcd23c8d1553708a"       # testnet placeholder
 
 # ── Cadence scripts ───────────────────────────────────────────────────────────
 _REGISTER_NODE_SCRIPT = """
-import SwarmVerifierV3 from {contract_addr}
+import SwarmVerifierV4 from {contract_addr}
 transaction(nodeId: String, stake: UFix64) {{
     prepare(signer: &Account) {{}}
     execute {{
-        SwarmVerifierV3.registerNode(nodeId: nodeId, stake: stake)
+        SwarmVerifierV4.registerNode(nodeId: nodeId, stake: stake)
     }}
 }}
 """
 
 _SUBMIT_VERDICT_SCRIPT = """
-import SwarmVerifierV3 from {contract_addr}
+import SwarmVerifierV4 from {contract_addr}
 transaction(
     eventId: String,
     auditorId: String,
@@ -115,7 +115,7 @@ transaction(
 ) {{
     prepare(signer: &Account) {{}}
     execute {{
-        SwarmVerifierV3.submitVerdict(
+        SwarmVerifierV4.submitVerdict(
             eventId: eventId,
             auditorId: auditorId,
             verdict: verdict,
@@ -721,7 +721,7 @@ class AuditorNode:
 
     def _register_on_flow(self):
         """
-        Calls SwarmVerifierV3.registerNode() once. Idempotent — the contract
+        Calls SwarmVerifierV4.registerNode() once. Idempotent — the contract
         pre-condition rejects duplicates gracefully, so this is safe on every run.
         """
         flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "")
@@ -798,7 +798,7 @@ def main():
                         help="Base URL for verdict submission (mock transporter or live).")
     parser.add_argument("--flow-contract", default=os.environ.get("FLOW_CONTRACT_ADDR",
                                                                    FLOW_CONTRACT_ADDR_DEFAULT),
-                        help="SwarmVerifierV3 contract address on Flow Testnet.")
+                        help="SwarmVerifierV4 contract address on Flow Testnet.")
     parser.add_argument("--flow-enabled", action="store_true", default=False,
                         help="Submit verdicts to the live Flow contract. "
                              "Requires FLOW_ACCOUNT_ADDR and FLOW_ACCOUNT_KEY env vars.")

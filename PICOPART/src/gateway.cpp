@@ -55,7 +55,7 @@ void gateway_init(const uint8_t *priv_32) {
     flow_tx_init(
         priv_32,
         FLOW_ACCOUNT_ADDR,    // build flag: e.g. "0x1234567890abcdef"
-        FLOW_CONTRACT_ADDR,   // build flag: deployed SwarmVerifierV3 address
+        FLOW_CONTRACT_ADDR,   // build flag: deployed SwarmVerifierV4 address
         "rest-testnet.onflow.org"
     );
 

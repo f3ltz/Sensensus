@@ -1,21 +1,5 @@
 // flow_tx.cpp — on-device Flow transaction construction for the Pico 2W (RP2350)
 // Architecture: PL_Genesis Hackathon 2026
-//
-// Self-contained: SHA3-256 (SW), RLP encoder, Base64, HTTPS GET/POST, and the
-// complete Flow transaction envelope construction, signing, and submission.
-//
-// Why this works without a relay:
-//   crypto.cpp already calls uECC_sign(priv, hash32, 32, sig, secp256r1()).
-//   uECC_sign operates on a *pre-hashed* 32-byte message. Flow just requires
-//   SHA3-256 of the envelope rather than SHA-256. Same key, same curve,
-//   different hash — no firmware restructure needed.
-//
-// Memory budget (RP2350, 520 KB SRAM):
-//   SHA3 state      : 200 B
-//   RLP staging     : 8 KB  (static, not on stack)
-//   TX body JSON    : 8 KB  (static)
-//   Response buffers: 2 KB  (static)
-//   Total           : ~19 KB — well within budget alongside TFLite (~64 KB)
 
 #include "flow_tx.h"
 #include "config.h"
@@ -36,7 +20,7 @@ static char    _api_host[64];       // "rest-testnet.onflow.org"
 // ═════════════════════════════════════════════════════════════════════════════
 // §1  SHA3-256 — Keccak-f[1600], NIST padding 0x06
 // ═════════════════════════════════════════════════════════════════════════════
-#define SHA3_RATE 136   // (1600 - 2*256)/8
+#define SHA3_RATE 136
 
 static const uint64_t _RC[24] = {
     0x0000000000000001ULL, 0x0000000000008082ULL,
@@ -122,7 +106,7 @@ static void _sha3_256(const uint8_t *in, size_t len, uint8_t out[32]) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §2  RLP encoder (Ethereum-compatible — Flow uses it for TX envelopes)
+// §2  RLP encoder
 // ═════════════════════════════════════════════════════════════════════════════
 
 static size_t _rlp_hdr(uint8_t base_short, uint8_t base_long,
@@ -160,8 +144,7 @@ static size_t _rlp_list_hdr(size_t plen, uint8_t *out, size_t cap) {
 // ═════════════════════════════════════════════════════════════════════════════
 // §3  Base64 encoder + decoder
 // ═════════════════════════════════════════════════════════════════════════════
-static const char _B64[] =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char _B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 static size_t _b64_enc(const uint8_t *in, size_t ilen, char *out, size_t ocap) {
     size_t n = 0;
@@ -179,7 +162,6 @@ static size_t _b64_enc(const uint8_t *in, size_t ilen, char *out, size_t ocap) {
     out[n]='\0'; return n;
 }
 
-// Decode a base64 string into raw bytes. Returns decoded length.
 static const uint8_t _BD[256] = {
     64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
     64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
@@ -205,7 +187,7 @@ static size_t _b64_dec(const char *in, size_t ilen, uint8_t *out, size_t ocap) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §4  HTTPS helpers (TLS, setInsecure — fine for testnet)
+// §4  HTTPS helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
 static int _https_get(const char *path, char *rbuf, size_t rcap) {
@@ -233,8 +215,7 @@ static int _https_get(const char *path, char *rbuf, size_t rcap) {
     rbuf[n]='\0'; cli.stop(); return code;
 }
 
-static int _https_post(const char *path, const char *body,
-                       char *rbuf, size_t rcap) {
+static int _https_post(const char *path, const char *body, char *rbuf, size_t rcap) {
     WiFiClientSecure cli; 
     cli.setInsecure();
     cli.setTimeout(15);
@@ -282,37 +263,22 @@ static bool _hex_to_bytes(const char *hex, size_t hlen, uint8_t *out) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §6  Flow REST helpers — fetch reference block ID and sequence number
+// §6  Flow REST helpers
 // ═════════════════════════════════════════════════════════════════════════════
 static bool _get_ref_block(uint8_t ref_id[32]) {
     static char rbuf[4096];
     int code = _https_get("/v1/blocks?height=sealed", rbuf, sizeof(rbuf));
-    if (code != 200) { 
-        Serial.printf("[FlowTx] get_ref_block HTTP %d\n", code); 
-        return false; 
-    }
+    if (code != 200) { Serial.printf("[FlowTx] get_ref_block HTTP %d\n", code); return false; }
 
-    // Response has "id": "hexstring" with a space after colon
-    // Look for the id field inside "header" object
     const char *header = strstr(rbuf, "\"header\"");
-    if (!header) {
-        Serial.println("[FlowTx] no header field");
-        return false;
-    }
-    // Find "id" after the header marker
+    if (!header) { Serial.println("[FlowTx] no header field"); return false; }
+    
     const char *p = strstr(header, "\"id\"");
-    if (!p) {
-        Serial.println("[FlowTx] no id field");
-        return false;
-    }
-    // Skip past "id" then skip : and any spaces/quotes
-    p += 4;  // skip "id"
+    if (!p) { Serial.println("[FlowTx] no id field"); return false; }
+    p += 4;
     while (*p == ' ' || *p == ':' || *p == '"') p++;
 
-    if (strlen(p) < 64) {
-        Serial.printf("[FlowTx] id too short: %d\n", (int)strlen(p));
-        return false;
-    }
+    if (strlen(p) < 64) { Serial.printf("[FlowTx] id too short: %d\n", (int)strlen(p)); return false; }
     Serial.printf("[FlowTx] ref block id=%.16s...\n", p);
     return _hex_to_bytes(p, 64, ref_id);
 }
@@ -325,16 +291,10 @@ static bool _get_seq_num(uint64_t *seq_out) {
     int code = _https_get(path, rbuf, sizeof(rbuf));
     if (code != 200) { Serial.printf("[FlowTx] get_seq_num HTTP %d\n", code); return false; }
     
-    // Find the key name
     const char *p = strstr(rbuf, "\"sequence_number\"");
     if (!p) { Serial.println("[FlowTx] get_seq_num: field missing"); return false; }
-    
-    // Skip the string "sequence_number" (17 chars)
     p += 17;
-    
-    // Skip any colons, spaces, or quote marks before the actual number
     while (*p == ' ' || *p == ':' || *p == '"') p++;
-    
     *seq_out = (uint64_t)atoll(p);
     return true;
 }
@@ -343,8 +303,6 @@ static bool _get_seq_num(uint64_t *seq_out) {
 // §7  RLP payload + envelope construction
 // ═════════════════════════════════════════════════════════════════════════════
 
-// "FLOW-V0.0-transaction\x00..." padded to 32 bytes
-// "FLOW-V0.0-transaction" = 21 bytes, so 11 trailing null bytes
 static const uint8_t _DOMAIN_TAG[32] = {
     'F','L','O','W','-','V','0','.','0','-',
     't','r','a','n','s','a','c','t','i','o','n',
@@ -353,7 +311,7 @@ static const uint8_t _DOMAIN_TAG[32] = {
 
 typedef struct {
     const char  *script;
-    const char **args_json;  // array of Cadence JSON strings, already serialised
+    const char **args_json;  
     int          n_args;
     uint32_t     gas_limit;
 } _tx_params;
@@ -401,7 +359,7 @@ static size_t _build_rlp_payload(const _tx_params *p, const uint8_t ref_id[32],
     // 8. payer address
     W(_rlp_bytes, _account_raw, 8);
 
-    // 9. authorizers list: [[addr_bytes]]
+    // 9. authorizers list: [addr_bytes] (FIXED)
     {
         static uint8_t ai[16];
         size_t in  = _rlp_bytes(_account_raw, 8, ai, sizeof(ai));
@@ -424,7 +382,6 @@ static bool _sign_envelope(const uint8_t *payload_rlp, size_t plen, uint8_t sig_
 
     memcpy(env, _DOMAIN_TAG, 32); pos = 32;
 
-    // Outer list: [payload_rlp, []]  — [] = 0xc0
     size_t inner_len = plen + 1;
     size_t hn = _rlp_list_hdr(inner_len, env+pos, sizeof(env)-pos);
     if (!hn) { Serial.println("[FlowTx] envelope overflow"); return false; }
@@ -445,10 +402,8 @@ static bool _sign_envelope(const uint8_t *payload_rlp, size_t plen, uint8_t sig_
 
 // ═════════════════════════════════════════════════════════════════════════════
 // §8  Cadence argument builders
-//     Each returns a pointer into a per-slot static buffer.
-//     Up to 6 slots — sufficient for all transactions in this project.
 // ═════════════════════════════════════════════════════════════════════════════
-static char _as[6][768];  // argument scratch, 6 slots
+static char _as[6][1024];  
 
 static const char *_cstr(int slot, const char *v) {
     snprintf(_as[slot], sizeof(_as[slot]), "{\"type\":\"String\",\"value\":\"%s\"}", v);
@@ -472,7 +427,7 @@ static const char *_cstr_arr(const char **vals, int n) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §9  Script template expansion — substitute {CONTRACT} placeholder
+// §9  Script template expansion
 // ═════════════════════════════════════════════════════════════════════════════
 static char _script_buf[1280];
 static const char *_expand(const char *tmpl) {
@@ -485,7 +440,7 @@ static const char *_expand(const char *tmpl) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// §10  Core TX submission — build, sign, POST, optionally poll for seal
+// §10  Core TX submission
 // ═════════════════════════════════════════════════════════════════════════════
 
 static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) {
@@ -500,30 +455,25 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
     uint8_t sig[64];
     if (!_sign_envelope(payload_rlp, plen, sig)) return false;
 
-    // Base64-encode script
     static char script_b64[1280];
     _b64_enc((const uint8_t*)p->script, strlen(p->script), script_b64, sizeof(script_b64));
 
-    // Base64-encode each argument
     static char arg_b64[6][1024];
     for (int i=0; i<p->n_args && i<6; i++)
         _b64_enc((const uint8_t*)p->args_json[i], strlen(p->args_json[i]),
                   arg_b64[i], sizeof(arg_b64[i]));
 
-    // Base64-encode signature
     static char sig_b64[128];
     _b64_enc(sig, 64, sig_b64, sizeof(sig_b64));
 
-    // Reference block ID as hex (REST API wants hex, not base64)
     static char ref_hex[65];
     for (int i=0; i<32; i++) snprintf(ref_hex+i*2, 3, "%02x", ref_id[i]);
 
-    // Canonical account address WITHOUT 0x prefix (Required by Flow REST API)
+    // Canonical account address WITHOUT 0x prefix (FIXED)
     const char *raw = _account_addr;
     if (raw[0]=='0'&&raw[1]=='x') raw+=2;
     static char addr_hex[24]; snprintf(addr_hex, sizeof(addr_hex), "%s", raw);
 
-    // Build arguments JSON array
     static char args_arr[4096]; int ap=0;
     ap+=snprintf(args_arr+ap, sizeof(args_arr)-ap, "[");
     for (int i=0; i<p->n_args&&i<6; i++) {
@@ -532,7 +482,6 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
     }
     ap+=snprintf(args_arr+ap, sizeof(args_arr)-ap, "]");
 
-    // Assemble POST body
     static char body[8192];
     snprintf(body, sizeof(body),
         "{"
@@ -566,37 +515,37 @@ static bool _submit_tx(const _tx_params *p, bool wait_seal, char tx_id_out[65]) 
         return false;
     }
 
-    // Extract tx ID
+    // Extract tx ID (FIXED)
     const char *idp = strstr(resp, "\"id\"");
     if (!idp) { Serial.println("[FlowTx] no id in response"); return false; }
-    
-    // Skip past "id" and any colons, spaces, or quotes
     idp += 4; 
     while (*idp == ' ' || *idp == ':' || *idp == '"') idp++;
-    
-    // Flow transaction IDs are always exactly 64 hex characters
-    strncpy(tx_id_out, idp, 64); 
-    tx_id_out[64]='\0';
-    
+    strncpy(tx_id_out, idp, 64); tx_id_out[64]='\0';
     Serial.printf("[FlowTx] TX %s\n", tx_id_out);
     Serial.printf("[FlowTx]   https://testnet.flowscan.io/tx/%s\n", tx_id_out);
 
     if (!wait_seal) return true;
 
-    // Poll for seal (max 60 s)
+    // Poll for seal with increased buffer size (FIXED)
     static char poll_path[128], poll_resp[4096];
     snprintf(poll_path, sizeof(poll_path), "/v1/transactions/%s/results", tx_id_out);
-    uint32_t deadline = millis()+60000;
-    while (millis()<deadline) {
-        delay(3000);
-        if (_https_get(poll_path, poll_resp, sizeof(poll_resp)) == 200) {
+    uint32_t start_time = millis();
+    const uint32_t timeout_ms = 150000; // INCREASED TO 150 SECONDS
+    
+    while (millis() - start_time < timeout_ms) {
+        delay(5000); // Increased polling interval to avoid spamming the REST API
+        int poll_code = _https_get(poll_path, poll_resp, sizeof(poll_resp));
+        
+        if (poll_code == 200) {
             if (strstr(poll_resp,"\"SEALED\"")||strstr(poll_resp,"\"Sealed\"")||strstr(poll_resp,"\"sealed\""))
                 { Serial.println("[FlowTx] ✓ SEALED"); return true; }
             if (strstr(poll_resp,"\"FAILED\"")||strstr(poll_resp,"\"Failed\""))
                 { Serial.println("[FlowTx] ✗ FAILED"); return false; }
+        } else {
+            Serial.printf("[FlowTx] Poll HTTP %d\n", poll_code);
         }
     }
-    Serial.println("[FlowTx] ✗ Seal timeout (60 s)");
+    Serial.println("[FlowTx] ✗ Seal timeout (150 s)");
     return false;
 }
 
@@ -611,7 +560,6 @@ void flow_tx_init(const uint8_t *priv_32, const char *account_addr,
     strncpy(_contract_addr, contract_addr, sizeof(_contract_addr)-1);
     strncpy(_api_host,      api_host,      sizeof(_api_host)-1);
 
-    // Parse 8-byte raw address for RLP (strip "0x", left-pad to 16 hex = 8 bytes)
     const char *hex = account_addr;
     if (hex[0]=='0'&&hex[1]=='x') hex+=2;
     char padded[17]="0000000000000000"; size_t hlen=strlen(hex);
@@ -623,16 +571,27 @@ void flow_tx_init(const uint8_t *priv_32, const char *account_addr,
 
 // ── registerNode ──────────────────────────────────────────────────────────────
 bool flow_tx_register_node(const char *node_id, double stake_flow) {
+    
+    // 1. Check if we are already registered to avoid the 60s Cadence error timeout
+    float current_stake = 0.0f, current_rep = 0.0f;
+    if (flow_tx_query_node(node_id, &current_stake, &current_rep)) {
+        if (current_stake > 0.0f) {
+            Serial.printf("[FlowTx] Node already registered on-chain (Stake: %.2f). Skipping TX.\n", current_stake);
+            return true; // Already registered, treat as success!
+        }
+    }
+
+    // 2. If not registered, proceed with the transaction
     const char *script = _expand(
-        "import SwarmVerifierV3 from {CONTRACT}\n"
+        "import SwarmVerifierV4 from {CONTRACT}\n"
         "transaction(nodeId: String, stake: UFix64) {\n"
         "    prepare(signer: &Account) {}\n"
-        "    execute { SwarmVerifierV3.registerNode(nodeId: nodeId, stake: stake) }\n"
+        "    execute { SwarmVerifierV4.registerNode(nodeId: nodeId, stake: stake) }\n"
         "}"
     );
     const char *args[2] = { _cstr(0,node_id), _cufix(1,stake_flow) };
     _tx_params p = { script, args, 2, 9999 };
-    char tx_id[65]; bool ok = _submit_tx(&p, /*wait_seal=*/true, tx_id);
+    char tx_id[65]; bool ok = _submit_tx(&p, true, tx_id);
     if (ok) Serial.printf("[FlowTx] registerNode sealed: %.16s...\n", tx_id);
     return ok;
 }
@@ -643,122 +602,120 @@ bool flow_tx_register_anomaly(const char *transporter_pub_hex,
                                float anomaly_confidence,
                                const char **quorum_ids, int n_quorum,
                                float payment_per_auditor) {
+    
+    // Updated script without Gateway resource borrow
     const char *script = _expand(
-        "import SwarmVerifierV3 from {CONTRACT}\n"
+        "import SwarmVerifierV4 from {CONTRACT}\n"
         "transaction(\n"
         "    transporterId: String, submissionSig: String,\n"
-        "    anomalyConfidence: UFix64, quorumIds: [String], paymentPerAuditor: UFix64\n"
+        "    anomalyConfidence: UFix64, quorumIds: [String], bidPrices: [UFix64]\n"
         ") {\n"
-        "    let gw: &SwarmVerifierV3.Gateway\n"
-        "    prepare(signer: auth(Storage) &Account) {\n"
-        "        self.gw = signer.storage.borrow<&SwarmVerifierV3.Gateway>(\n"
-        "            from: SwarmVerifierV3.GatewayStoragePath\n"
-        "        ) ?? panic(\"No Gateway\")\n"
-        "    }\n"
+        "    prepare(signer: &Account) {}\n"
         "    execute {\n"
-        "        self.gw.registerAnomaly(\n"
+        "        SwarmVerifierV4.registerAnomaly(\n"
         "            transporterId: transporterId, submissionSig: submissionSig,\n"
         "            anomalyConfidence: anomalyConfidence, quorumIds: quorumIds,\n"
-        "            paymentPerAuditor: paymentPerAuditor\n"
+        "            bidPrices: bidPrices\n"
         "        )\n"
         "    }\n"
         "}"
     );
+
+    // Build the dynamic bidPrices array JSON
+    static char bid_arr_scratch[1024];
+    int bp=0;
+    bp+=snprintf(bid_arr_scratch+bp, sizeof(bid_arr_scratch)-bp, "{\"type\":\"Array\",\"value\":[");
+    for (int i=0; i<n_quorum; i++) {
+        if (i) bp+=snprintf(bid_arr_scratch+bp, sizeof(bid_arr_scratch)-bp, ",");
+        bp+=snprintf(bid_arr_scratch+bp, sizeof(bid_arr_scratch)-bp,
+                     "{\"type\":\"UFix64\",\"value\":\"%.8f\"}", (double)payment_per_auditor);
+    }
+    bp+=snprintf(bid_arr_scratch+bp, sizeof(bid_arr_scratch)-bp, "]}");
+
     const char *args[5] = {
         _cstr(0, transporter_pub_hex),
         _cstr(1, submission_sig_hex),
         _cufix(2, (double)anomaly_confidence),
         _cstr_arr(quorum_ids, n_quorum),
-        _cufix(4, (double)payment_per_auditor),
+        bid_arr_scratch,
     };
+    
     _tx_params p = { script, args, 5, 9999 };
     char tx_id[65];
-    // wait_seal=true — PKT_QUORUM must not fire before PendingEvent exists on-chain
-    bool ok = _submit_tx(&p, /*wait_seal=*/true, tx_id);
+    bool ok = _submit_tx(&p, true, tx_id);
     if (ok) Serial.printf("[FlowTx] registerAnomaly sealed: %.16s...\n", tx_id);
     return ok;
 }
 
 // ── submitDeposit ─────────────────────────────────────────────────────────────
-// Called in _handle_POST_pay() after nonce verification, before CSV is streamed.
-// wait_seal=true: the deposit lock must be confirmed before data is released.
-// If this returns false the caller must respond 503 — no data without escrow.
 bool flow_tx_submit_deposit(const char *event_id, const char *auditor_pub_hex,
                              float deposit_amount, float bid_amount) {
+    
+    // Updated script without Gateway resource borrow
     const char *script = _expand(
-        "import SwarmVerifierV3 from {CONTRACT}\n"
-        "transaction(eventId: String, auditorId: String, deposit: UFix64, bid: UFix64) {\n"
-        "    let gw: &SwarmVerifierV3.Gateway\n"
-        "    prepare(signer: auth(Storage) &Account) {\n"
-        "        self.gw = signer.storage.borrow<&SwarmVerifierV3.Gateway>(\n"
-        "            from: SwarmVerifierV3.GatewayStoragePath\n"
-        "        ) ?? panic(\"No Gateway\")\n"
-        "    }\n"
+        "import SwarmVerifierV4 from {CONTRACT}\n"
+        "transaction(eventId: String, auditorId: String) {\n"
+        "    prepare(signer: &Account) {}\n"
         "    execute {\n"
-        "        self.gw.submitDeposit(\n"
-        "            eventId: eventId, auditorId: auditorId,\n"
-        "            deposit: deposit, bid: bid\n"
-        "        )\n"
+        "        SwarmVerifierV4.recordDeposit(eventId: eventId, auditorId: auditorId)\n"
         "    }\n"
         "}"
     );
-    const char *args[4] = {
+    
+    // Note: deposit_amount and bid_amount are no longer passed to the updated Cadence function
+    const char *args[2] = {
         _cstr(0, event_id),
-        _cstr(1, auditor_pub_hex),
-        _cufix(2, (double)deposit_amount),
-        _cufix(3, (double)bid_amount),
+        _cstr(1, auditor_pub_hex)
     };
-    _tx_params p = { script, args, 4, 9999 };
+    
+    _tx_params p = { script, args, 2, 9999 };
     char tx_id[65];
-    bool ok = _submit_tx(&p, /*wait_seal=*/true, tx_id);
-    if (ok) Serial.printf("[FlowTx] submitDeposit sealed: %.16s...\n", tx_id);
+    bool ok = _submit_tx(&p, true, tx_id);
+    if (ok) Serial.printf("[FlowTx] recordDeposit sealed: %.16s...\n", tx_id);
     return ok;
 }
 
 // ── finalizeEvent ─────────────────────────────────────────────────────────────
 bool flow_tx_finalize_event(const char *event_id) {
     const char *script = _expand(
-        "import SwarmVerifierV3 from {CONTRACT}\n"
+        "import SwarmVerifierV4 from {CONTRACT}\n"
         "transaction(eventId: String) {\n"
         "    prepare(signer: &Account) {}\n"
-        "    execute { SwarmVerifierV3.finalizeEvent(eventId: eventId) }\n"
+        "    execute { SwarmVerifierV4.finalizeEvent(eventId: eventId) }\n"
         "}"
     );
     const char *args[1] = { _cstr(0, event_id) };
     _tx_params p = { script, args, 1, 9999 };
     char tx_id[65];
-    return _submit_tx(&p, /*wait_seal=*/false, tx_id);
+    return _submit_tx(&p, false, tx_id);
 }
 
 // ── updateEventCid ────────────────────────────────────────────────────────────
 bool flow_tx_update_cid(const char *event_id, const char *cid) {
+    
+    // Updated script without Gateway resource borrow
     const char *script = _expand(
-        "import SwarmVerifierV3 from {CONTRACT}\n"
+        "import SwarmVerifierV4 from {CONTRACT}\n"
         "transaction(eventId: String, cid: String) {\n"
-        "    let gw: &SwarmVerifierV3.Gateway\n"
-        "    prepare(signer: auth(Storage) &Account) {\n"
-        "        self.gw = signer.storage.borrow<&SwarmVerifierV3.Gateway>(\n"
-        "            from: SwarmVerifierV3.GatewayStoragePath\n"
-        "        ) ?? panic(\"No Gateway\")\n"
-        "    }\n"
-        "    execute { self.gw.updateEventCid(eventId: eventId, cid: cid) }\n"
+        "    prepare(signer: &Account) {}\n"
+        "    execute { SwarmVerifierV4.updateEventCid(eventId: eventId, cid: cid) }\n"
         "}"
     );
     const char *args[2] = { _cstr(0, event_id), _cstr(1, cid) };
     _tx_params p = { script, args, 2, 9999 };
     char tx_id[65];
-    return _submit_tx(&p, /*wait_seal=*/false, tx_id);
+    return _submit_tx(&p, false, tx_id);
 }
 
-// ── queryNode — read-only Cadence script, no signing ─────────────────────────
+// ── queryNode ─────────────────────────────────────────────────────────────────
 bool flow_tx_query_node(const char *pub_hex, float *stake_out, float *rep_out) {
     *stake_out = 0.0f; *rep_out = 0.0f;
 
     const char *script = _expand(
-        "import SwarmVerifierV3 from {CONTRACT}\n"
+        "import SwarmVerifierV4 from {CONTRACT}\n"
         "access(all) fun main(nodeId: String): [AnyStruct] {\n"
-        "    let s = SwarmVerifierV3.getStake(nodeId: nodeId)      ?? 0.0\n"
-        "    let r = SwarmVerifierV3.getReputation(nodeId: nodeId) ?? Fix64(0)\n"
+        "    let s = SwarmVerifierV4.getStake(nodeId: nodeId)      ?? 0.0\n"
+        "    let r = SwarmVerifierV4.getReputation(nodeId: nodeId) ?? Fix64(0)\n"
         "    return [s, r]\n"
         "}"
     );
@@ -779,9 +736,6 @@ bool flow_tx_query_node(const char *pub_hex, float *stake_out, float *rep_out) {
     int code = _https_post("/v1/scripts", body, resp, sizeof(resp));
     if (code != 200) { Serial.printf("[FlowTx] queryNode HTTP %d\n", code); return false; }
 
-    // Response: {"value": "<base64 Cadence JSON>"}
-    // Decoded: {"type":"Array","value":[{"type":"UFix64","value":"10.00000000"},
-    //                                   {"type":"Fix64", "value":"0.00000000"}]}
     const char *vp = strstr(resp, "\"value\":\"");
     if (!vp) return false;
     vp += 9;
@@ -792,7 +746,6 @@ bool flow_tx_query_node(const char *pub_hex, float *stake_out, float *rep_out) {
     size_t dlen = _b64_dec(vp, b64len, (uint8_t*)decoded, sizeof(decoded)-1);
     decoded[dlen] = '\0';
 
-    // Extract first and second numeric value fields from the decoded Cadence JSON
     const char *first = strstr(decoded, "\"value\":\"");
     if (first) {
         first += 9; *stake_out = (float)atof(first);

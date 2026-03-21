@@ -36,7 +36,7 @@ Environment variables
 ---------------------
   RELAY_PORT          – port to listen on (default 8090)
   FLOW_API_URL        – Flow gRPC access node (default devnet)
-  FLOW_CONTRACT_ADDR  – SwarmVerifierV3 address on testnet
+  FLOW_CONTRACT_ADDR  – SwarmVerifierV4 address on testnet
   FLOW_ACCOUNT_ADDR   – deployer account address (holds Gateway resource)
   FLOW_ACCOUNT_KEY    – hex-encoded secp256r1 private key for that account
   PAYMENT_PER_AUDITOR – default payment in FLOW if not supplied in body (default 1.0)
@@ -78,7 +78,7 @@ FLOW_ENABLED = bool(FLOW_ACCOUNT_ADDR and FLOW_ACCOUNT_KEY and FLOW_CONTRACT_ADD
 
 def _REGISTER_ANOMALY_TX():
     return (
-        f"import SwarmVerifierV3 from {FLOW_CONTRACT_ADDR}\n"
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
         "transaction(\n"
         "    transporterId:     String,\n"
         "    submissionSig:     String,\n"
@@ -86,10 +86,10 @@ def _REGISTER_ANOMALY_TX():
         "    quorumIds:         [String],\n"
         "    paymentPerAuditor: UFix64\n"
         ") {\n"
-        "    let gateway: &SwarmVerifierV3.Gateway\n"
+        "    let gateway: &SwarmVerifierV4.Gateway\n"
         "    prepare(signer: auth(Storage) &Account) {\n"
-        "        self.gateway = signer.storage.borrow<&SwarmVerifierV3.Gateway>(\n"
-        "            from: SwarmVerifierV3.GatewayStoragePath\n"
+        "        self.gateway = signer.storage.borrow<&SwarmVerifierV4.Gateway>(\n"
+        "            from: SwarmVerifierV4.GatewayStoragePath\n"
         "        ) ?? panic(\"No Gateway resource\")\n"
         "    }\n"
         "    execute {\n"
@@ -107,12 +107,12 @@ def _REGISTER_ANOMALY_TX():
 
 def _UPDATE_CID_TX():
     return (
-        f"import SwarmVerifierV3 from {FLOW_CONTRACT_ADDR}\n"
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
         "transaction(eventId: String, cid: String) {\n"
-        "    let gateway: &SwarmVerifierV3.Gateway\n"
+        "    let gateway: &SwarmVerifierV4.Gateway\n"
         "    prepare(signer: auth(Storage) &Account) {\n"
-        "        self.gateway = signer.storage.borrow<&SwarmVerifierV3.Gateway>(\n"
-        "            from: SwarmVerifierV3.GatewayStoragePath\n"
+        "        self.gateway = signer.storage.borrow<&SwarmVerifierV4.Gateway>(\n"
+        "            from: SwarmVerifierV4.GatewayStoragePath\n"
         "        ) ?? panic(\"No Gateway resource\")\n"
         "    }\n"
         "    execute {\n"
@@ -124,10 +124,10 @@ def _UPDATE_CID_TX():
 
 def _QUERY_NODE_SCRIPT():
     return (
-        f"import SwarmVerifierV3 from {FLOW_CONTRACT_ADDR}\n"
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
         "access(all) fun main(nodeId: String): [AnyStruct] {\n"
-        "    let stake = SwarmVerifierV3.getStake(nodeId: nodeId) ?? 0.0\n"
-        "    let rep   = SwarmVerifierV3.getReputation(nodeId: nodeId) ?? Fix64(0)\n"
+        "    let stake = SwarmVerifierV4.getStake(nodeId: nodeId) ?? 0.0\n"
+        "    let rep   = SwarmVerifierV4.getReputation(nodeId: nodeId) ?? Fix64(0)\n"
         "    return [stake, rep]\n"
         "}"
     )

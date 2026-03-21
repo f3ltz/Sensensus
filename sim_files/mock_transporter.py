@@ -12,10 +12,10 @@ Implements the full protocol:
   HTTP (simulates both Pico endpoints and the Flow contract in dev mode):
     GET  /data?pubkey=<hex>  → 402 + nonce
     POST /pay               → 200 with { csv, payload }
-    POST /verdict           → simulates SwarmVerifierV3.submitVerdict()
+    POST /verdict           → simulates SwarmVerifierV4.submitVerdict()
     GET  /state             → dashboard snapshot
 
-Three-phase settlement (mirrors SwarmVerifierV3.cdc):
+Three-phase settlement (mirrors SwarmVerifierV4.cdc):
   Phase 1 — registerAnomaly: after quorum selected, submission_sig computed,
              escrow locked (simulated), event registered in pending_events.
   Phase 2 — submitVerdict:  each auditor posts to /verdict independently.
@@ -89,7 +89,7 @@ W_REP   = 0.3
 W_STAKE = 0.2
 QUORUM_SIZE = 3
 
-# Reputation formula constants (must match SwarmVerifierV3.cdc)
+# Reputation formula constants (must match SwarmVerifierV4.cdc)
 ALPHA = 10.0
 BETA  = 5.0
 
@@ -97,12 +97,12 @@ BETA  = 5.0
 ANOMALY_THRESHOLD = 0.85
 
 # ── Flow testnet config ───────────────────────────────────────────────────────
-# Set FLOW_ENABLED = True once SwarmVerifierV3 is deployed to testnet.
+# Set FLOW_ENABLED = True once SwarmVerifierV4 is deployed to testnet.
 # When False: quorum scoring uses local bid prices only (no stake/rep lookup).
 FLOW_ENABLED       = True
 FLOW_REST_URL      = "https://rest-testnet.onflow.org/v1/scripts"
 FLOW_CONTRACT_ADDR = "0xfcd23c8d1553708a"
-FLOW_CONTRACT_NAME = "SwarmVerifierV3"
+FLOW_CONTRACT_NAME = "SwarmVerifierV4"
 PAYMENT_PER_AUDITOR = 0.001  # FLOW paid to each aligned auditor per event
 
 
@@ -174,11 +174,11 @@ def _register_transporter_on_flow():
         print("[Flow] (simulated) registerNode for transporter")
         return
     cadence = (
-        f"import SwarmVerifierV3 from {FLOW_CONTRACT_ADDR}\n"
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
         "transaction(nodeId: String, stake: UFix64) {\n"
         "    prepare(signer: auth(Storage) &Account) {}\n"
         "    execute {\n"
-        "        SwarmVerifierV3.registerNode(nodeId: nodeId, stake: stake)\n"
+        "        SwarmVerifierV4.registerNode(nodeId: nodeId, stake: stake)\n"
         "    }\n"
         "}"
     )
@@ -403,7 +403,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         if self.path == "/pay":
             self._handle_pay(body)
         elif self.path == "/verdict":
-            # Simulates SwarmVerifierV3.submitVerdict() in dev mode.
+            # Simulates SwarmVerifierV4.submitVerdict() in dev mode.
             # When FLOW_ENABLED=True, auditors post directly to the contract
             # and this endpoint is unused.
             self._handle_verdict(body)
@@ -534,7 +534,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
             "payload": payload,
         })
 
-    # ── POST /verdict  (simulates SwarmVerifierV3.submitVerdict) ─────────────
+    # ── POST /verdict  (simulates SwarmVerifierV4.submitVerdict) ─────────────
 
     def _handle_verdict(self, body: dict):
         """
@@ -635,7 +635,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
             threading.Thread(target=_finalize_event, daemon=True).start()
 
 
-# ── Consensus / finalization  (mirrors SwarmVerifierV3.finalizeEvent) ─────────
+# ── Consensus / finalization  (mirrors SwarmVerifierV4.finalizeEvent) ─────────
 
 def _finalize_event():
     """
@@ -875,7 +875,7 @@ def _decode_cadence(v):
 
 def _query_flow_stake_reputation(pubkey_hex: str) -> tuple:
     """
-    Query SwarmVerifierV3 on Flow testnet for stake and reputation.
+    Query SwarmVerifierV4 on Flow testnet for stake and reputation.
     Returns (stake: float, reputation: float). Falls back to (0.0, 0.0) on error.
 
     Two separate queries avoid the UFix64→Fix64 cast that Cadence 1.0 rejects.
@@ -1242,13 +1242,13 @@ def _register_anomaly_on_flow(quorum: dict):
         return
 
     cadence = (
-        f"import SwarmVerifierV3 from {FLOW_CONTRACT_ADDR}\n"
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
         "transaction(transporterId: String, submissionSig: String,\n"
         "anomalyConfidence: UFix64, quorumIds: [String], paymentPerAuditor: UFix64) {\n"
-        "    let gateway: &SwarmVerifierV3.Gateway\n"
+        "    let gateway: &SwarmVerifierV4.Gateway\n"
         "    prepare(signer: auth(Storage) &Account) {\n"
-        "        self.gateway = signer.storage.borrow<&SwarmVerifierV3.Gateway>(\n"
-        "            from: SwarmVerifierV3.GatewayStoragePath\n"
+        "        self.gateway = signer.storage.borrow<&SwarmVerifierV4.Gateway>(\n"
+        "            from: SwarmVerifierV4.GatewayStoragePath\n"
         "        ) ?? panic(\"No Gateway resource\")\n"
         "    }\n"
         "    execute {\n"
@@ -1281,10 +1281,10 @@ def _finalize_event_on_flow(event_id: str):
         return
 
     cadence = (
-        f"import SwarmVerifierV3 from {FLOW_CONTRACT_ADDR}\n"
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
         "transaction(eventId: String) {\n"
         "    prepare(signer: auth(Storage) &Account) {}\n"
-        "    execute { SwarmVerifierV3.finalizeEvent(eventId: eventId) }\n"
+        "    execute { SwarmVerifierV4.finalizeEvent(eventId: eventId) }\n"
         "}"
     )
 

@@ -1,4 +1,4 @@
-// SwarmVerifierV3.cdc — PL_Genesis Hackathon 2026
+// SwarmVerifierV4.cdc — PL_Genesis Hackathon 2026
 //
 // Economic model (deposit update):
 //
@@ -18,7 +18,7 @@
 // NOTE: Real @FlowToken.Vault movement is simulated as UFix64 accounting.
 // NOTE: No ECDSA-P256 precompile in Cadence 1.0 — sigs stored for off-chain audit.
 
-access(all) contract SwarmVerifierV3 {
+access(all) contract SwarmVerifierV4 {
 
     access(all) let alpha:              Fix64    //  10.0  reputation reward
     access(all) let beta:               Fix64    //   5.0  deviation penalty
@@ -63,7 +63,7 @@ access(all) contract SwarmVerifierV3 {
         }
         access(contract) fun applyReputationDelta(delta: Fix64) {
             self.reputation = self.reputation + delta
-            if self.reputation < SwarmVerifierV3.blacklistThreshold {
+            if self.reputation < SwarmVerifierV4.blacklistThreshold {
                 self.isBlacklisted = true
                 emit AgentBlacklisted(nodeId: self.nodeId, reputation: self.reputation, stakedFlow: self.stakedFlow)
             }
@@ -131,7 +131,7 @@ access(all) contract SwarmVerifierV3 {
 
         access(all) fun isReadyToFinalize(): Bool {
             if self.verdicts.length >= self.quorumIds.length { return true }
-            return getCurrentBlock().timestamp - self.registeredAt >= SwarmVerifierV3.verdictTimeoutSecs
+            return getCurrentBlock().timestamp - self.registeredAt >= SwarmVerifierV4.verdictTimeoutSecs
         }
 
         access(all) fun totalBidEscrow(): UFix64 {
@@ -220,10 +220,10 @@ access(all) contract SwarmVerifierV3 {
             quorumIds.length > 0:                                    "Empty quorum"
             quorumIds.length == bidPrices.length:                    "Parallel array length mismatch"
             anomalyConfidence >= 0.0 && anomalyConfidence <= 1.0:   "Confidence out of range"
-            SwarmVerifierV3.networkAgents[transporterId] != nil:     "Transporter not registered"
-            !SwarmVerifierV3.networkAgents[transporterId]!.isBlacklisted: "Transporter blacklisted"
-            SwarmVerifierV3.pendingEvents[submissionSig] == nil:     "Duplicate submissionSig"
-            SwarmVerifierV3.anomalyLedger[submissionSig] == nil:     "Event already finalized"
+            SwarmVerifierV4.networkAgents[transporterId] != nil:     "Transporter not registered"
+            !SwarmVerifierV4.networkAgents[transporterId]!.isBlacklisted: "Transporter blacklisted"
+            SwarmVerifierV4.pendingEvents[submissionSig] == nil:     "Duplicate submissionSig"
+            SwarmVerifierV4.anomalyLedger[submissionSig] == nil:     "Event already finalized"
         }
 
         var bidMap: {String: UFix64} = {}
@@ -235,11 +235,11 @@ access(all) contract SwarmVerifierV3 {
             i = i + 1
         }
 
-        var transporter = SwarmVerifierV3.networkAgents[transporterId]!
+        var transporter = SwarmVerifierV4.networkAgents[transporterId]!
         transporter.lockEscrow(amount: totalBidEscrow)
-        SwarmVerifierV3.networkAgents[transporterId] = transporter
+        SwarmVerifierV4.networkAgents[transporterId] = transporter
 
-        SwarmVerifierV3.pendingEvents[submissionSig] = PendingEvent(
+        SwarmVerifierV4.pendingEvents[submissionSig] = PendingEvent(
             transporterId: transporterId, submissionSig: submissionSig,
             anomalyConfidence: anomalyConfidence, quorumIds: quorumIds, bidPrices: bidMap
         )
@@ -253,23 +253,23 @@ access(all) contract SwarmVerifierV3 {
 
     access(all) fun recordDeposit(eventId: String, auditorId: String) {
         pre {
-            SwarmVerifierV3.pendingEvents[eventId] != nil:               "Event not found"
-            !SwarmVerifierV3.pendingEvents[eventId]!.finalized:          "Event finalized"
-            SwarmVerifierV3.networkAgents[auditorId] != nil:             "Auditor not registered"
-            !SwarmVerifierV3.networkAgents[auditorId]!.isBlacklisted:    "Auditor blacklisted"
-            SwarmVerifierV3.pendingEvents[eventId]!.deposits[auditorId] == nil: "Deposit already recorded"
-            SwarmVerifierV3.pendingEvents[eventId]!.bidPrices[auditorId] != nil: "Auditor not in quorum"
+            SwarmVerifierV4.pendingEvents[eventId] != nil:               "Event not found"
+            !SwarmVerifierV4.pendingEvents[eventId]!.finalized:          "Event finalized"
+            SwarmVerifierV4.networkAgents[auditorId] != nil:             "Auditor not registered"
+            !SwarmVerifierV4.networkAgents[auditorId]!.isBlacklisted:    "Auditor blacklisted"
+            SwarmVerifierV4.pendingEvents[eventId]!.deposits[auditorId] == nil: "Deposit already recorded"
+            SwarmVerifierV4.pendingEvents[eventId]!.bidPrices[auditorId] != nil: "Auditor not in quorum"
         }
 
-        let amount = SwarmVerifierV3.depositPerAuditor
+        let amount = SwarmVerifierV4.depositPerAuditor
 
-        var auditor = SwarmVerifierV3.networkAgents[auditorId]!
+        var auditor = SwarmVerifierV4.networkAgents[auditorId]!
         auditor.lockEscrow(amount: amount)
-        SwarmVerifierV3.networkAgents[auditorId] = auditor
+        SwarmVerifierV4.networkAgents[auditorId] = auditor
 
-        var ev = SwarmVerifierV3.pendingEvents[eventId]!
+        var ev = SwarmVerifierV4.pendingEvents[eventId]!
         ev.recordDeposit(auditorId: auditorId, amount: amount)
-        SwarmVerifierV3.pendingEvents[eventId] = ev
+        SwarmVerifierV4.pendingEvents[eventId] = ev
 
         emit DepositRecorded(eventId: eventId, auditorId: auditorId, amount: amount)
     }
@@ -278,12 +278,12 @@ access(all) contract SwarmVerifierV3 {
 
     access(all) fun updateEventCid(eventId: String, cid: String) {
         pre {
-            SwarmVerifierV3.anomalyLedger[eventId] != nil: "Event not finalized"
+            SwarmVerifierV4.anomalyLedger[eventId] != nil: "Event not finalized"
             cid.length > 0: "Empty CID"
         }
-        var ev = SwarmVerifierV3.anomalyLedger[eventId]!
+        var ev = SwarmVerifierV4.anomalyLedger[eventId]!
         ev.setCid(cid: cid)
-        SwarmVerifierV3.anomalyLedger[eventId] = ev
+        SwarmVerifierV4.anomalyLedger[eventId] = ev
         emit EventCidUpdated(eventId: eventId, cid: cid)
     }
 
@@ -295,26 +295,26 @@ access(all) contract SwarmVerifierV3 {
     ) {
         pre {
             confidence >= 0.0 && confidence <= 1.0:                          "Confidence out of range"
-            SwarmVerifierV3.pendingEvents[eventId] != nil:                   "Event not found"
-            !SwarmVerifierV3.pendingEvents[eventId]!.finalized:              "Already finalized"
-            SwarmVerifierV3.networkAgents[auditorId] != nil:                 "Auditor not registered"
-            !SwarmVerifierV3.networkAgents[auditorId]!.isBlacklisted:        "Auditor blacklisted"
-            SwarmVerifierV3.pendingEvents[eventId]!.verdicts[auditorId] == nil: "Already submitted"
-            SwarmVerifierV3.pendingEvents[eventId]!.deposits[auditorId] != nil: "No deposit — pay first"
+            SwarmVerifierV4.pendingEvents[eventId] != nil:                   "Event not found"
+            !SwarmVerifierV4.pendingEvents[eventId]!.finalized:              "Already finalized"
+            SwarmVerifierV4.networkAgents[auditorId] != nil:                 "Auditor not registered"
+            !SwarmVerifierV4.networkAgents[auditorId]!.isBlacklisted:        "Auditor blacklisted"
+            SwarmVerifierV4.pendingEvents[eventId]!.verdicts[auditorId] == nil: "Already submitted"
+            SwarmVerifierV4.pendingEvents[eventId]!.deposits[auditorId] != nil: "No deposit — pay first"
             payloadSignature.length > 0:                                     "Empty payloadSignature"
         }
 
         var inQuorum = false
-        for id in SwarmVerifierV3.pendingEvents[eventId]!.quorumIds {
+        for id in SwarmVerifierV4.pendingEvents[eventId]!.quorumIds {
             if id == auditorId { inQuorum = true; break }
         }
         assert(inQuorum, message: "Auditor not in declared quorum")
 
-        var ev = SwarmVerifierV3.pendingEvents[eventId]!
+        var ev = SwarmVerifierV4.pendingEvents[eventId]!
         ev.addVerdict(v: PendingVerdict(auditorId: auditorId, verdict: verdict,
             confidence: confidence, payloadSignature: payloadSignature,
             verdictSignature: verdictSignature))
-        SwarmVerifierV3.pendingEvents[eventId] = ev
+        SwarmVerifierV4.pendingEvents[eventId] = ev
 
         emit VerdictSubmitted(eventId: eventId, auditorId: auditorId, verdict: verdict,
             verdictN: ev.verdicts.length, quorumN: ev.quorumIds.length)
@@ -324,11 +324,11 @@ access(all) contract SwarmVerifierV3 {
 
     access(all) fun finalizeEvent(eventId: String) {
         pre {
-            SwarmVerifierV3.pendingEvents[eventId] != nil:      "Event not found"
-            !SwarmVerifierV3.pendingEvents[eventId]!.finalized: "Already finalized"
+            SwarmVerifierV4.pendingEvents[eventId] != nil:      "Event not found"
+            !SwarmVerifierV4.pendingEvents[eventId]!.finalized: "Already finalized"
         }
 
-        let pendingEvent = SwarmVerifierV3.pendingEvents[eventId]!
+        let pendingEvent = SwarmVerifierV4.pendingEvents[eventId]!
         assert(pendingEvent.isReadyToFinalize(), message: "Not ready to finalize")
 
         // Cswarm + consensus
@@ -360,10 +360,10 @@ access(all) contract SwarmVerifierV3 {
             let verdictSig = submitted?.verdictSignature ?? ""
             let aligned    = !silent && (verdict == consensusVerdict)
 
-            var delta: Fix64 = SwarmVerifierV3.alpha * (cswarmF - Fix64(confidence))
-            if !aligned { delta = delta - SwarmVerifierV3.beta }
+            var delta: Fix64 = SwarmVerifierV4.alpha * (cswarmF - Fix64(confidence))
+            if !aligned { delta = delta - SwarmVerifierV4.beta }
 
-            var auditorAgent = SwarmVerifierV3.networkAgents[id]!
+            var auditorAgent = SwarmVerifierV4.networkAgents[id]!
             auditorAgent.applyReputationDelta(delta: delta)
             auditorAgent.recordAudit(wasCorrect: aligned)
 
@@ -390,7 +390,7 @@ access(all) contract SwarmVerifierV3 {
                 transporterRecovery = transporterRecovery + bid
             }
 
-            SwarmVerifierV3.networkAgents[id] = auditorAgent
+            SwarmVerifierV4.networkAgents[id] = auditorAgent
 
             auditorResults.append(AuditorResult(
                 auditorId: id, verdict: verdict, confidence: confidence,
@@ -402,7 +402,7 @@ access(all) contract SwarmVerifierV3 {
 
         // Transporter escrow release + false-positive slash
         let totalBidEscrow = pendingEvent.totalBidEscrow()
-        var transporterAgent = SwarmVerifierV3.networkAgents[pendingEvent.transporterId]!
+        var transporterAgent = SwarmVerifierV4.networkAgents[pendingEvent.transporterId]!
         transporterAgent.releaseEscrow(amount: totalBidEscrow)
         if transporterRecovery > 0.0 { transporterAgent.receivePayment(amount: transporterRecovery) }
 
@@ -412,9 +412,9 @@ access(all) contract SwarmVerifierV3 {
             if paidToAuditors > 0.0 { transporterAgent.slashStake(amount: paidToAuditors) }
             transporterSlashed = true
         }
-        SwarmVerifierV3.networkAgents[pendingEvent.transporterId] = transporterAgent
+        SwarmVerifierV4.networkAgents[pendingEvent.transporterId] = transporterAgent
 
-        SwarmVerifierV3.anomalyLedger[eventId] = AnomalyEvent(
+        SwarmVerifierV4.anomalyLedger[eventId] = AnomalyEvent(
             eventId: eventId, transporterId: pendingEvent.transporterId,
             submissionSig: pendingEvent.submissionSig,
             anomalyConfidence: pendingEvent.anomalyConfidence,
@@ -425,7 +425,7 @@ access(all) contract SwarmVerifierV3 {
 
         var mutableEvent = pendingEvent
         mutableEvent.markFinalized()
-        SwarmVerifierV3.pendingEvents[eventId] = mutableEvent
+        SwarmVerifierV4.pendingEvents[eventId] = mutableEvent
 
         emit AnomalySettled(eventId: eventId, transporterId: pendingEvent.transporterId,
             consensusVerdict: consensusVerdict, cswarm: cswarm,

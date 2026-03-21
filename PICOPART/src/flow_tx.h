@@ -21,7 +21,7 @@
 void flow_tx_init(
     const uint8_t *priv_32,        // 32-byte P-256 private key
     const char    *account_addr,   // "0x<16 hex>" — this Pico's Flow account
-    const char    *contract_addr,  // "0x<16 hex>" — deployed SwarmVerifierV3
+    const char    *contract_addr,  // "0x<16 hex>" — deployed SwarmVerifierV4
     const char    *api_host        // "rest-testnet.onflow.org" (no scheme)
 );
 
