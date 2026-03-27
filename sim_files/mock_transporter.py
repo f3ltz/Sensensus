@@ -332,7 +332,7 @@ class TransporterState:
             "auditor_pubkey":      auditor_pubkey_hex,
             "anomaly_confidence":  self.anomaly_confidence,
             "timestamp_ms":        int(time.time() * 1000),
-            "submission_sig":      self.current_event_id,   # ← auditor reads this key
+            "event_id":      self.current_event_id,   # ← auditor reads this key
         }
         canonical = json.dumps(body, separators=(',', ':')).encode()
         sig_hex   = _sign(self.sk, canonical).hex()

@@ -2,3 +2,39 @@
 PICOPART/.venv
 PICOPART/.pio
 PICOPART/.vscode
+
+# Dependency directories
+dashboard/node_modules/
+
+# Logs
+dashboard/logs/
+dashboard/*.log
+dashboard/npm-debug.log*
+dashboard/yarn-debug.log*
+dashboard/yarn-error.log*
+
+# Optional npm cache directory
+dashboard/.npm
+
+# Optional eslint cache
+dashboard/.eslintcache
+
+# Build output (if you use build tools)
+dashboard/dist/
+dashboard/build/
+
+# Vite cache (since you have vite.config.js)
+dashboard/node_modules/.vite/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# OS files (optional)
+dashboard/.DS_Store
+dashboard/Thumbs.db
+
+# IDE files (optional, adjust for your editor)
+dashboard/.vscode/
+dashboard/.idea/
