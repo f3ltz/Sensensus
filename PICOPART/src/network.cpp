@@ -423,7 +423,7 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
         "\"anomaly_confidence\":%.4f,"
         "\"timestamp_ms\":%lu,"
         "\"event_id\":\"%s\","
-        "\"deposit\":.4f,"
+        "\"deposit\":%.4f,"
         "\"payload_signature\":\"%s\"}",
         g_pubHex, pub_hex, g_lastConfidence,
         (unsigned long)millis(), g_currentEventId, DEPOSIT_AMOUNT, payload_sig_hex);

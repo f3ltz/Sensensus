@@ -71,7 +71,7 @@ static void _run_anomaly_cycle() {
 
     // 1. Snapshot CSV buffer before sending anomaly broadcast
     imu_buildCsvBuffer(g_csvBuffer, sizeof(g_csvBuffer));
-
+    __dmb();
     // 2. Upload CSV to Storacha
     //    (skipped in simulation mode — gateway returns fake CID)
     char cid[128] = "";
@@ -221,6 +221,7 @@ void setup() {
     multicore_launch_core1([](){
         while(true){
             if(g_http_ready){
+                __dmb();
                 net_handleHttp();
             } else {
                 delay(10);
