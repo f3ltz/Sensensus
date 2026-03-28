@@ -11,9 +11,6 @@ extern "C" {
 // Call once at startup. Uses RP2350 hardware TRNG.
 void     crypto_init();
 
-// Generate a fresh P-256 keypair. priv=32B, pub=64B (X||Y, no 0x04 prefix).
-bool     crypto_keygen(uint8_t *priv_out, uint8_t *pub_out);
-
 // ECDSA-P256/SHA-256. sig must be 64 bytes. Returns true on success.
 bool     crypto_sign  (const uint8_t *priv, const uint8_t *msg, size_t msg_len,
                        uint8_t *sig_out);

@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <pico/rand.h>
+#include "gateway.h"
 
 // ── External state injected by main.cpp ──────────────────────────────────────
 extern uint8_t  g_privKey[PRIVKEY_BYTES];
@@ -384,8 +385,17 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     }
 
     // Invalidate nonce (replay prevention)
+    // After this line:
     ne->valid = false;
 
+    // ADD THIS BLOCK:
+    if (!gateway_submit_deposit(g_currentEventId, pub_hex,
+                                doc["deposit"] | (float)DEPOSIT_AMOUNT,
+                                0.0f)) {
+        _http_send(cli, 503, "application/json",
+                "{\"error\":\"Flow.submitDeposit() failed — deposit not locked on-chain\"}");
+        return;
+    }
     // Build canonical JSON for payload signature
     char canonical[512];
     snprintf(canonical, sizeof(canonical),
@@ -406,16 +416,17 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     }
 
     // Build payload JSON
-    char payload_json[768];
+    char payload_json[900];
     snprintf(payload_json, sizeof(payload_json),
         "{\"transporter_pubkey\":\"%s\","
         "\"auditor_pubkey\":\"%s\","
         "\"anomaly_confidence\":%.4f,"
         "\"timestamp_ms\":%lu,"
         "\"event_id\":\"%s\","
+        "\"deposit\":.4f,"
         "\"payload_signature\":\"%s\"}",
         g_pubHex, pub_hex, g_lastConfidence,
-        (unsigned long)millis(), g_currentEventId, payload_sig_hex);
+        (unsigned long)millis(), g_currentEventId, DEPOSIT_AMOUNT, payload_sig_hex);
 
     // Count escaped CSV length (\n becomes \\n = 2 bytes)
     size_t csv_escaped_len = 0;

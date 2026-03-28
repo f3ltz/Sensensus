@@ -188,7 +188,8 @@ def _register_transporter_on_flow():
         tx = tx.add_arguments(UFix64(stake_ufix))
         return tx
     try:
-        asyncio.run(_flow_tx_async(cadence, build, "registerNode(transporter)", wait_seal=True))
+        with _flow_tx_lock:
+            asyncio.run(_flow_tx_async(cadence, build, "registerNode(transporter)", wait_seal=True))
     except Exception as e:
         if "already registered" not in str(e):
             print(f"[Flow] Transporter registerNode error: {e}")
@@ -647,6 +648,7 @@ def _finalize_event():
     This closes the free-rider attack: an auditor cannot observe others'
     verdicts and submit last to guarantee alignment. Silence = wrong answer.
     """
+    saved_event_id = state.current_event_id
     with state.verdicts_lock:
         received = dict(state.verdicts)
 
@@ -706,7 +708,7 @@ def _finalize_event():
 
     # ── Print settlement summary ──────────────────────────────────────────────
     print("\n" + "═" * 64)
-    print(f"  SETTLEMENT — event_id={state.current_event_id[:16]}...")
+    print(f"  SETTLEMENT — event_id={saved_event_id[:16]}...")
     print("═" * 64)
     print(f"  Auditors     : {n}  (received: {len(received)}  silent: {n - len(received)})")
     print(f"  Drop votes   : {drop_votes}/{n}")
@@ -1172,7 +1174,7 @@ def trigger_anomaly():
     print("[Anomaly] Cycle complete, returning to IDLE\n")
 
 
-_flow_tx_lock = asyncio.Lock()
+_flow_tx_lock = threading.Lock()
 
 async def _flow_tx_async(script, build_args_fn, label, wait_seal=False):
     flow_addr = os.environ.get("TESTNET_ADDRESS", "").removeprefix("0x")
@@ -1181,55 +1183,55 @@ async def _flow_tx_async(script, build_args_fn, label, wait_seal=False):
         print(f"[Flow] FLOW_ACCOUNT_ADDR/FLOW_ACCOUNT_KEY not set — {label} skipped")
         return None
 
-    async with _flow_tx_lock:
-        for attempt in range(3):
-            try:
-                async with flow_client(host="access.devnet.nodes.onflow.org", port=9000) as client:
-                    account      = await client.get_account(address=Address.from_hex(flow_addr))
-                    account_key  = account.keys[0]
-                    latest_block = await client.get_latest_block(is_sealed=True)
-                    tx = Tx(code=script)
-                    tx = build_args_fn(tx)
-                    tx = (tx
-                        .with_reference_block_id(latest_block.id)
-                        .with_gas_limit(9999)
-                        .with_proposal_key(ProposalKey(
-                            key_address         = Address.from_hex(flow_addr),
-                            key_id              = account_key.index,
-                            key_sequence_number = account_key.sequence_number,
-                        ))
-                        .with_payer(Address.from_hex(flow_addr))
-                    )
-                    tx.add_authorizers(Address.from_hex(flow_addr))
-                    sk     = SigningKey.from_string(bytes.fromhex(flow_key), curve=NIST256p)
-                    signer = _EcdsaSigner(sk)
-                    tx = tx.with_envelope_signature(
-                        Address.from_hex(flow_addr),
-                        account_key.index,
-                        signer,
-                    )
-                    timeout = 60.0 if wait_seal else 30.0
-                    result  = await client.execute_transaction(tx, wait_for_seal=wait_seal, timeout=timeout)
-                    tx_id   = result.id.hex() if hasattr(result.id, "hex") else str(result.id)
-                    print(f"[Flow] ✓ {label} submitted → TX {tx_id}")
-                    print(f"[Flow]   https://testnet.flowscan.io/tx/{tx_id}")
-                    if wait_seal:
-                        print(f"[Flow] ✓ {label} sealed")
-                    state.register_sealed.set()
-                    return tx_id
-            except Exception as e:
-                err = str(e)
-                if "sequence number" in err and attempt < 2:
-                    print(f"[Flow] Sequence number mismatch on attempt {attempt + 1}, retrying...")
-                    await asyncio.sleep(2)
-                    continue
-                if "already registered" in err:
-                    print(f"[Flow] {label} — already registered on-chain, skipping.")
-                    state.register_sealed.set()
-                    return None
-                print(f"[Flow] {label} error: {e}")
+
+    for attempt in range(3):
+        try:
+            async with flow_client(host="access.devnet.nodes.onflow.org", port=9000) as client:
+                account      = await client.get_account(address=Address.from_hex(flow_addr))
+                account_key  = account.keys[0]
+                latest_block = await client.get_latest_block(is_sealed=True)
+                tx = Tx(code=script)
+                tx = build_args_fn(tx)
+                tx = (tx
+                    .with_reference_block_id(latest_block.id)
+                    .with_gas_limit(9999)
+                    .with_proposal_key(ProposalKey(
+                        key_address         = Address.from_hex(flow_addr),
+                        key_id              = account_key.index,
+                        key_sequence_number = account_key.sequence_number,
+                    ))
+                    .with_payer(Address.from_hex(flow_addr))
+                )
+                tx.add_authorizers(Address.from_hex(flow_addr))
+                sk     = SigningKey.from_string(bytes.fromhex(flow_key), curve=NIST256p)
+                signer = _EcdsaSigner(sk)
+                tx = tx.with_envelope_signature(
+                    Address.from_hex(flow_addr),
+                    account_key.index,
+                    signer,
+                )
+                timeout = 60.0 if wait_seal else 30.0
+                result  = await client.execute_transaction(tx, wait_for_seal=wait_seal, timeout=timeout)
+                tx_id   = result.id.hex() if hasattr(result.id, "hex") else str(result.id)
+                print(f"[Flow] ✓ {label} submitted → TX {tx_id}")
+                print(f"[Flow]   https://testnet.flowscan.io/tx/{tx_id}")
+                if wait_seal:
+                    print(f"[Flow] ✓ {label} sealed")
+                state.register_sealed.set()
+                return tx_id
+        except Exception as e:
+            err = str(e)
+            if "sequence number" in err and attempt < 2:
+                print(f"[Flow] Sequence number mismatch on attempt {attempt + 1}, retrying...")
+                await asyncio.sleep(2)
+                continue
+            if "already registered" in err:
+                print(f"[Flow] {label} — already registered on-chain, skipping.")
                 state.register_sealed.set()
                 return None
+            print(f"[Flow] {label} error: {e}")
+            state.register_sealed.set()
+            return None
 
 def _register_anomaly_on_flow(quorum: dict):
     """Phase 1: registerAnomaly via Gateway. Blocks until sealed so
@@ -1242,38 +1244,38 @@ def _register_anomaly_on_flow(quorum: dict):
         return
 
     cadence = (
-        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
-        "transaction(transporterId: String, submissionSig: String,\n"
-        "anomalyConfidence: UFix64, quorumIds: [String], paymentPerAuditor: UFix64) {\n"
-        "    let gateway: &SwarmVerifierV4.Gateway\n"
-        "    prepare(signer: auth(Storage) &Account) {\n"
-        "        self.gateway = signer.storage.borrow<&SwarmVerifierV4.Gateway>(\n"
-        "            from: SwarmVerifierV4.GatewayStoragePath\n"
-        "        ) ?? panic(\"No Gateway resource\")\n"
-        "    }\n"
-        "    execute {\n"
-        "        self.gateway.registerAnomaly(\n"
-        "            transporterId: transporterId, submissionSig: submissionSig,\n"
-        "            anomalyConfidence: anomalyConfidence, quorumIds: quorumIds,\n"
-        "            paymentPerAuditor: paymentPerAuditor\n"
-        "        )\n"
-        "    }\n"
-        "}"
+    f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
+    "transaction(\n"
+    "    transporterId: String, submissionSig: String,\n"
+    "    anomalyConfidence: UFix64, quorumIds: [String], bidPrices: [UFix64]\n"
+    ") {\n"
+    "    prepare(signer: &Account) {}\n"
+    "    execute {\n"
+    "        SwarmVerifierV4.registerAnomaly(\n"
+    "            transporterId: transporterId,\n"
+    "            submissionSig: submissionSig,\n"
+    "            anomalyConfidence: anomalyConfidence,\n"
+    "            quorumIds: quorumIds,\n"
+    "            bidPrices: bidPrices\n"
+    "        )\n"
+    "    }\n"
+    "}"
     )
 
     conf_ufix64    = int(state.anomaly_confidence * 1e8)
-    payment_ufix64 = int(PAYMENT_PER_AUDITOR * 1e8)
     quorum_ids     = list(quorum.keys())
+    bid_prices_ufix = [int(PAYMENT_PER_AUDITOR * 1e8)] * len(quorum_ids)
 
     def build(tx):
         tx = tx.add_arguments(String(state.pub_hex))
         tx = tx.add_arguments(String(state.current_event_id))
         tx = tx.add_arguments(UFix64(conf_ufix64))
         tx = tx.add_arguments(Array([String(i) for i in quorum_ids]))
-        tx = tx.add_arguments(UFix64(payment_ufix64))
+        tx = tx.add_arguments(Array([UFix64(p) for p in bid_prices_ufix]))
         return tx
 
-    asyncio.run(_flow_tx_async(cadence, build, "registerAnomaly", wait_seal=True))
+    with _flow_tx_lock:
+        asyncio.run(_flow_tx_async(cadence, build, "registerAnomaly", wait_seal=True))
 
 
 def _finalize_event_on_flow(event_id: str):
@@ -1291,7 +1293,8 @@ def _finalize_event_on_flow(event_id: str):
     def build(tx):
         return tx.add_arguments(String(event_id))
 
-    asyncio.run(_flow_tx_async(cadence, build, "finalizeEvent", wait_seal=True))
+    with _flow_tx_lock:
+        asyncio.run(_flow_tx_async(cadence, build, "finalizeEvent", wait_seal=True))
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

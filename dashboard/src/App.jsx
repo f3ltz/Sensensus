@@ -824,7 +824,14 @@ export default function SwarmDashboard() {
     runScript(flowAddrRef.current, makeAuditorResultsScript(flowAddrRef.current), [{ type:"String", value:id }])
       .then(rows => {
         const results = (rows||[]).map(r => ({ auditorId:r.auditorId, verdict:r.verdict, confidence:r.confidence, reputationDelta:r.reputationDelta, outcome:r.outcome, depositPaid:r.depositPaid, bidPrice:r.bidPrice, totalReceived:r.totalReceived }));
-        if (results.length > 0) setAuditorCache(c => ({ ...c, [id]: results }));
+        if (results.length > 0) setAuditorCache(c => {
+            const keys = Object.keys(c);
+            // Keep only last 20 events in cache
+            const trimmed = keys.length >= 20
+                ? Object.fromEntries(keys.slice(-19).map(k => [k, c[k]]))
+                : c;
+            return { ...trimmed, [id]: results };
+        });;
       }).catch(()=>{});
   }, [selectedEvent?.event_id]);
 

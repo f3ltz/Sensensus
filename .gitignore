@@ -37,4 +37,4 @@ dashboard/Thumbs.db
 
 # IDE files (optional, adjust for your editor)
 dashboard/.vscode/
-dashboard/.idea/
+dashboard/ .idea/
