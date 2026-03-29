@@ -15,6 +15,7 @@ static sh2_SensorValue_t _sensorVal;
 // ── Ring buffers ──────────────────────────────────────────────────────────────
 static ImuSample g_sampleWindow[WINDOW_SIZE_SAMPLES];  // 50-sample inference window
 static ImuSample g_csvRing[CSV_BUFFER_SAMPLES];         // 75-sample payload buffer
+static uint32_t _last_commit_ms = 0;
 static int       g_windowHead = 0;
 static int       g_csvHead    = 0;
 static bool      g_windowFull = false;
@@ -30,6 +31,7 @@ ImuSample g_lastSample = {};
 // ── Helper: commit a fully-assembled sample ───────────────────────────────────
 static void _commit_sample() {
     uint32_t ts = millis();
+    _last_commit_ms = millis();
     ImuSample s = { ts, _pending_ax, _pending_ay, _pending_az,
                     _pending_qw, _pending_qx, _pending_qy, _pending_qz };
 
@@ -95,6 +97,9 @@ void imu_update() {
         if (_have_accel && _have_quat) {
             _commit_sample();
         }
+    }
+    if ((_have_accel || _have_quat) && (millis() - _last_commit_ms > 40)) {
+        _commit_sample();
     }
 }
 

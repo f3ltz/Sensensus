@@ -10,6 +10,7 @@
 #include <Arduino.h>
 #include <string.h>
 #include <pico/rand.h>
+#include "gateway.h"
 
 // ── External state injected by main.cpp ──────────────────────────────────────
 extern uint8_t  g_privKey[PRIVKEY_BYTES];
@@ -385,29 +386,17 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     }
 
     // Invalidate nonce (replay prevention)
+    // After this line:
     ne->valid = false;
 
-    // Phase 1.5: lock auditor deposit on-chain before serving CSV.
-    float deposit_amount = 0.5f;
-    {
-        JsonVariant dep = doc["deposit"];
-        if (!dep.isNull()) deposit_amount = dep.as<float>();
-    }
-
-    float bid_amount = 0.0f;
-    for (int i = 0; i < g_bidCount; i++) {
-        if (strcmp(g_bidPool[i].pubkey_hex, pub_hex) == 0) {
-            bid_amount = (float)g_bidPool[i].price;
-            break;
-        }
-    }
-
-    if (!gateway_submit_deposit(g_currentEventId, pub_hex, deposit_amount, bid_amount)) {
-        Serial.printf("[HTTP] gateway_submit_deposit failed for auditor\n");
-        _http_send(cli, 503, "application/json", "{\"error\":\"deposit TX failed — try again\"}");
+    // ADD THIS BLOCK:
+    if (!gateway_submit_deposit(g_currentEventId, pub_hex,
+                                doc["deposit"] | (float)DEPOSIT_AMOUNT,
+                                0.0f)) {
+        _http_send(cli, 503, "application/json",
+                "{\"error\":\"Flow.submitDeposit() failed — deposit not locked on-chain\"}");
         return;
     }
-
     // Build canonical JSON for payload signature
     char canonical[512];
     snprintf(canonical, sizeof(canonical),
@@ -427,19 +416,18 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
         _issuedCount++;
     }
 
-    // Build payload JSON — note: key is "event_id" to match auditor_node.py
-    char payload_json[768];
+    // Build payload JSON
+    char payload_json[900];
     snprintf(payload_json, sizeof(payload_json),
         "{\"transporter_pubkey\":\"%s\","
         "\"auditor_pubkey\":\"%s\","
         "\"anomaly_confidence\":%.4f,"
         "\"timestamp_ms\":%lu,"
         "\"event_id\":\"%s\","
-        "\"deposit\":%.8f,"
+        "\"deposit\":%.4f,"
         "\"payload_signature\":\"%s\"}",
         g_pubHex, pub_hex, g_lastConfidence,
-        (unsigned long)millis(), g_currentEventId,
-        (double)deposit_amount, payload_sig_hex);
+        (unsigned long)millis(), g_currentEventId, DEPOSIT_AMOUNT, payload_sig_hex);
 
     // Stream response
     size_t csv_escaped_len = 0;
