@@ -1,6 +1,7 @@
 #include "network.h"
 #include "crypto.h"
 #include "config.h"
+#include "gateway.h"
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <WiFiServer.h>
@@ -386,6 +387,27 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     // Invalidate nonce (replay prevention)
     ne->valid = false;
 
+    // Phase 1.5: lock auditor deposit on-chain before serving CSV.
+    float deposit_amount = 0.5f;
+    {
+        JsonVariant dep = doc["deposit"];
+        if (!dep.isNull()) deposit_amount = dep.as<float>();
+    }
+
+    float bid_amount = 0.0f;
+    for (int i = 0; i < g_bidCount; i++) {
+        if (strcmp(g_bidPool[i].pubkey_hex, pub_hex) == 0) {
+            bid_amount = (float)g_bidPool[i].price;
+            break;
+        }
+    }
+
+    if (!gateway_submit_deposit(g_currentEventId, pub_hex, deposit_amount, bid_amount)) {
+        Serial.printf("[HTTP] gateway_submit_deposit failed for auditor\n");
+        _http_send(cli, 503, "application/json", "{\"error\":\"deposit TX failed — try again\"}");
+        return;
+    }
+
     // Build canonical JSON for payload signature
     char canonical[512];
     snprintf(canonical, sizeof(canonical),
@@ -405,7 +427,7 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
         _issuedCount++;
     }
 
-    // Build payload JSON
+    // Build payload JSON — note: key is "event_id" to match auditor_node.py
     char payload_json[768];
     snprintf(payload_json, sizeof(payload_json),
         "{\"transporter_pubkey\":\"%s\","
@@ -413,22 +435,17 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
         "\"anomaly_confidence\":%.4f,"
         "\"timestamp_ms\":%lu,"
         "\"event_id\":\"%s\","
+        "\"deposit\":%.8f,"
         "\"payload_signature\":\"%s\"}",
         g_pubHex, pub_hex, g_lastConfidence,
-        (unsigned long)millis(), g_currentEventId, payload_sig_hex);
+        (unsigned long)millis(), g_currentEventId,
+        (double)deposit_amount, payload_sig_hex);
 
-    // Count escaped CSV length (\n becomes \\n = 2 bytes)
+    // Stream response
     size_t csv_escaped_len = 0;
     const char *p = g_csvBuffer;
-    while (*p) {
-        csv_escaped_len += (*p == '\n') ? 2 : 1;
-        p++;
-    }
+    while (*p) { csv_escaped_len += (*p == '\n') ? 2 : 1; p++; }
 
-    // Total body: {"csv":"<escaped>","payload":<payload_json>}
-    // {"csv":"    = 8 chars
-    // ","payload": = 12 chars
-    // }            = 1 char
     size_t payload_len = strlen(payload_json);
     int total_len = 8 + (int)csv_escaped_len + 12 + (int)payload_len + 1;
 
@@ -438,7 +455,6 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     cli.printf("Access-Control-Allow-Origin: *\r\n");
     cli.printf("Connection: close\r\n\r\n");
 
-    // Stream body in parts to avoid large buffer
     cli.printf("{\"csv\":\"");
     p = g_csvBuffer;
     while (*p) {
@@ -448,7 +464,8 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     }
     cli.printf("\",\"payload\":%s}", payload_json);
 
-    Serial.printf("[HTTP] 200 /pay  pub=...%s\n", pub_hex + PUBKEY_HEX_LEN - 12);
+    Serial.printf("[HTTP] 200 /pay  pub=...%s  deposit=%.2f\n",
+                  pub_hex + PUBKEY_HEX_LEN - 12, deposit_amount);
 }
 
 static void _handle_POST_verdict(WiFiClient &cli, const char *json_body) {

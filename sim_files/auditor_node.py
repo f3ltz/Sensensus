@@ -80,8 +80,8 @@ HTTP_PORT       = 8080
 # ── Timing ────────────────────────────────────────────────────────────────────
 BEACON_INTERVAL_S = 5.0
 QUORUM_WAIT_S     = 120.0   # wait for PKT_QUORUM after sending a bid
-DELIVERY_WAIT_S   = 20.0    # x402 HTTP timeout (generous — submitDeposit blocks Pico)
-VERDICT_WAIT_S    = 30.0    # Flow TX timeout
+DELIVERY_WAIT_S   = 90.0    # x402 HTTP timeout (generous — submitDeposit blocks Pico)
+VERDICT_WAIT_S    = 90.0    # Flow TX timeout
 
 # ── Economics ────────────────────────────────────────────────────────────────
 DEPOSIT_AMOUNT = 0.5        # FLOW locked as bond at POST /pay

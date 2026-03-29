@@ -132,16 +132,19 @@ static void _close_bid_window() {
     Serial.printf("[Main] Delivering to %d auditor(s)...\n", g_quorumSize);
 }
 
-// ── After delivery window closes ──────────────────────────────────────────────
 static void _close_delivery_window() {
     Serial.println("[Main] Delivery window closed — returning to IDLE");
 
-    // In production: wait for AnomalySettled event from Flow, then upload bundle
-    // to Storacha and call gateway_update_event_cid(). For demo this is simulated.
-    char final_cid[128] = "bafyreiSIMULATED_FINAL";
-    gateway_update_event_cid(g_currentEventId, final_cid);
+    // Phase 3: finalize event on-chain first (computes consensus, disburses funds)
+    Serial.println("[Main] Calling finalizeEvent...");
+    if (!gateway_finalize_event(g_currentEventId)) {
+        Serial.println("[Main] finalizeEvent failed — skipping updateEventCid");
+    } else {
+        // Post-consensus: record Storacha CID
+        char final_cid[128] = "bafyreiSIMULATED_FINAL";
+        gateway_update_event_cid(g_currentEventId, final_cid);
+    }
 
-    // Reset per-event state
     g_quorumSize = 0;
     memset(g_nonces, 0, sizeof(g_nonces));
     g_systemState = STATE_IDLE;
