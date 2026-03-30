@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { shortKey, fmtDuration, getNodeAlias } from "../utils.js";
+import { clamp, shortKey, fmtDuration, getNodeAlias } from "../utils.js";
 
 const PHASES = ["REGISTER", "DEPOSIT", "VERDICTS", "FINALIZE"];
 
@@ -30,6 +30,38 @@ function PhaseTracker({ depositCount, verdictCount, quorumSize }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function ConsensusMeter({ verdictMap, quorumSize }) {
+  // Count the active votes
+  const verdicts = Object.values(verdictMap).filter((v) => !v.silent);
+  const dropCount = verdicts.filter((v) => v.verdict).length;
+  const normCount = verdicts.filter((v) => !v.verdict).length;
+
+  // We map the target to 50% of the total width. 
+  // If quorumSize is 1, and we have 1 vote, it takes up 50% width (touching the center line).
+  const fillDrop = quorumSize > 0 ? clamp((dropCount / quorumSize) * 50, 0, 50) : 0;
+  const fillNorm = quorumSize > 0 ? clamp((normCount / quorumSize) * 50, 0, 50) : 0;
+
+  return (
+    <div className="tug-meter-wrapper">
+      <div className="tug-meter-labels">
+        <span className={dropCount > 0 ? "drop-label" : ""}>🚨 {dropCount} DROP</span>
+        <span className="threshold-label">RACE TO QUORUM ({quorumSize})</span>
+        <span className={normCount > 0 ? "norm-label" : ""}>{normCount} NORM ✅</span>
+      </div>
+      <div className="tug-meter-track">
+        {/* Drop bar races from the left */}
+        <div className="tug-meter-fill drop-fill" style={{ width: `${fillDrop}%` }} />
+        
+        {/* Norm bar races from the right */}
+        <div className="tug-meter-fill norm-fill" style={{ width: `${fillNorm}%` }} />
+        
+        {/* The finish line */}
+        <div className="tug-meter-center-line" />
+      </div>
     </div>
   );
 }
@@ -183,6 +215,8 @@ export default function PendingEventPanel({ pendingMeta, pendingVerdicts, select
               <span className="kv-val" style={{ color: "#f5a623" }}>{pendingMeta.length}</span>
             </div>
           </div>
+
+          <ConsensusMeter verdictMap={verdictMap} quorumSize={active.quorumSize} />
 
           {/* Per-auditor status */}
           {Object.keys(verdictMap).length > 0 && (

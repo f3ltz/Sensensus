@@ -159,6 +159,18 @@ const CSS = `
   .role-transporter { background: rgba(245,166,35,0.1); color: var(--amber); border: 1px solid rgba(245,166,35,0.3); }
   .topo-canvas { width: 100%; height: 100%; }
 
+  /* ── DATA PACKET ANIMATIONS ── */
+  @keyframes packet-flow-in {
+    from { stroke-dashoffset: -12; }
+    to { stroke-dashoffset: 0; }
+  }
+  .data-packet-stream {
+    /* 2px dot, 10px gap */
+    stroke-dasharray: 2 10; 
+    /* The animation makes the dots move continuously */
+    animation: packet-flow-in 0.6s linear infinite;
+  }
+
   /* ── IMU ── */
   .imu-body { position: absolute; inset: 0; overflow: hidden; }
   .imu-cube-section { position: absolute; top: 0; left: 0; right: 0; height: 140px; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid var(--border); }
@@ -216,6 +228,26 @@ const CSS = `
   .verdict-row { display: flex; align-items: center; gap: 6px; padding: 5px 8px; background: var(--bg2); border: 1px solid var(--border); font-size: 10px; animation: row-in 0.3s ease; }
   @keyframes row-in { from{opacity:0;transform:translateX(-8px)} to{opacity:1;transform:translateX(0)} }
 
+  /* ── RACE TO QUORUM METER ── */
+  .tug-meter-wrapper { margin-top: 12px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+  .tug-meter-labels { display: flex; justify-content: space-between; width: 100%; font-family: var(--font-head); font-size: 8px; letter-spacing: 0.1em; color: var(--text-dim); }
+  .tug-meter-labels .drop-label { color: var(--red); text-shadow: 0 0 6px rgba(255,58,92,0.3); }
+  .tug-meter-labels .norm-label { color: var(--blue); text-shadow: 0 0 6px rgba(79,195,247,0.3); }
+  .threshold-label { opacity: 0.6; }
+  
+  /* Made the track slightly taller (14px) and gave it a more visible background */
+  .tug-meter-track { width: 100%; height: 14px; background: rgba(26, 37, 64, 0.4); border: 1px solid var(--border); border-radius: 3px; position: relative; overflow: hidden; box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); }
+  .tug-meter-fill { position: absolute; top: 0; bottom: 0; transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1); }
+  
+  /* Red grows from left edge inward */
+  .drop-fill { left: 0; background: linear-gradient(90deg, rgba(255,58,92,0.3), var(--red)); box-shadow: 2px 0 8px rgba(255,58,92,0.4); }
+  
+  /* Blue grows from right edge inward */
+  .norm-fill { right: 0; background: linear-gradient(-90deg, rgba(79,195,247,0.3), var(--blue)); box-shadow: -2px 0 8px rgba(79,195,247,0.4); }
+  
+  /* The center finish line */
+  .tug-meter-center-line { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.8); box-shadow: 0 0 6px #fff; z-index: 2; }ug-meter-center-line { position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: var(--text-dim); box-shadow: 0 0 4px var(--bg); z-index: 2; }
+
   /* Elapsed timer */
   .elapsed-badge { font-family: var(--font-data); font-size: 11px; color: var(--amber); font-variant-numeric: tabular-nums; }
 
@@ -258,6 +290,29 @@ const CSS = `
   .rep-stake { font-family: var(--font-data); font-size: 9px; color: var(--text-dim); width: 56px; text-align: right; }
   .rep-escrow { font-family: var(--font-data); font-size: 9px; color: var(--amber-dim); width: 52px; text-align: right; }
   .rep-acc { font-size: 9px; width: 36px; text-align: right; }
+
+  /* ── REPUTATION SPOTLIGHT & DELTAS ── */
+  @keyframes flash-new-row {
+    0% { background-color: rgba(245,166,35,0.3); border-left-color: var(--amber); }
+    10% { transform: translateX(4px); }
+    100% { background-color: var(--bg2); transform: translateX(0); border-left-color: var(--border); }
+  }
+  .flash-highlight { animation: flash-new-row 4s ease-out forwards; }
+
+  @keyframes float-up-fade {
+    0%   { opacity: 0; transform: translateY(0px) scale(0.8); }
+    15%  { opacity: 1; transform: translateY(-8px) scale(1.1); }
+    80%  { opacity: 1; transform: translateY(-16px) scale(1); }
+    100% { opacity: 0; transform: translateY(-24px) scale(0.9); }
+  }
+  .delta-float {
+    position: absolute; right: 0; bottom: 100%;
+    font-family: var(--font-data); font-size: 11px; font-weight: bold;
+    animation: float-up-fade 4s ease-out forwards;
+    z-index: 10; pointer-events: none;
+  }
+  .delta-float.positive { color: var(--green); text-shadow: 0 0 6px rgba(57,255,132,0.6); }
+  .delta-float.negative { color: var(--red); text-shadow: 0 0 6px rgba(255,58,92,0.6); }
 
   /* Agent detail drawer */
   .agent-drawer { padding: 10px 14px; background: var(--bg); border-top: 1px solid var(--amber-dim); flex-shrink: 0; animation: row-in 0.2s ease; }

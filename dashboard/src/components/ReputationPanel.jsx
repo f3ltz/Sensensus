@@ -82,13 +82,17 @@ function AgentDrawer({ agent, transporterIds }) {
   );
 }
 
-export default function ReputationPanel({ agents, transporterIds, lastOk, error }) {
+export default function ReputationPanel({ agents, transporterIds, highlightedIds, recentDeltas, lastOk, error }) {
   const [sortKey,    setSortKey]    = useState("reputation");
   const [expandedId, setExpandedId] = useState(null);
 
   const sorted = useMemo(() => {
     const tSet = new Set(transporterIds);
     return [...agents].sort((a, b) => {
+      const aHigh = highlightedIds?.has(a.id) ? 1 : 0;
+      const bHigh = highlightedIds?.has(b.id) ? 1 : 0;
+      if (aHigh !== bHigh) return bHigh - aHigh;
+
       if (sortKey === "reputation") return b.reputation - a.reputation;
       if (sortKey === "stake")      return b.stake - a.stake;
       if (sortKey === "audits")     return b.totalAudits - a.totalAudits;
@@ -99,7 +103,7 @@ export default function ReputationPanel({ agents, transporterIds, lastOk, error 
       }
       return 0;
     });
-  }, [agents, sortKey, transporterIds]);
+  }, [agents, sortKey, transporterIds, highlightedIds]);
 
   const tSet          = new Set(transporterIds);
   const flowIndicator = error ? "ind-red" : lastOk ? "ind-green" : "ind-dim";
@@ -153,10 +157,13 @@ export default function ReputationPanel({ agents, transporterIds, lastOk, error 
             const isExpanded = expandedId === a.id;
             const role = isAuditor ? "Auditor" : "Transporter";
             const alias = getNodeAlias(a.id, role);
+            const isHighlighted = highlightedIds?.has(a.id);
+            const delta = recentDeltas?.[a.id];
+
             return (
               <div
                 key={a.id}
-                className={`rep-row ${repClass}`}
+                className={`rep-row ${repClass} ${isHighlighted ? "flash-highlight" : ""}`}
                 onClick={() => setExpandedId(isExpanded ? null : a.id)}
                 title="Click to expand"
               >
@@ -164,7 +171,16 @@ export default function ReputationPanel({ agents, transporterIds, lastOk, error 
                   <span style={{ color: "var(--text)", fontSize: "10px" }}>{alias}</span>
                   <span style={{ fontSize: "7px", opacity: 0.5 }}>{shortKey(a.id, 5, 4)}</span>
                 </div>
-                <div className="rep-bar-container">
+
+                <div className="rep-bar-container" style={{ position: "relative" }}>
+
+                  {/* THE FLOATING DELTA ANIMATION */}
+                  {delta !== undefined && delta !== 0 && (
+                    <span className={`delta-float ${delta > 0 ? "positive" : "negative"}`}>
+                      {delta > 0 ? "+" : ""}{delta.toFixed(2)}{delta > 0 ? " ▲" : " ▼"}
+                    </span>
+                  )}
+
                   <span className="rep-val" style={{ color: repColor }}>
                     {rep >= 0 ? "+" : ""}{rep.toFixed(1)}
                   </span>

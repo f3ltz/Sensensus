@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { shortKey, fmtTime, copyToClipboard, getNodeAlias } from "../utils.js";
+import { useState, useEffect } from "react";
+import {  fmtTime, copyToClipboard, getNodeAlias } from "../utils.js";
 
 function CopyField({ label, value }) {
   const [copied, setCopied] = useState(false);
@@ -16,6 +16,44 @@ function CopyField({ label, value }) {
       </div>
       <div className="sig-display" onClick={handle} title="Click to copy">{value}</div>
     </div>
+  );
+}
+
+function AnimatedNumber({ value, duration = 1000, decimals = 3, prefix = "", isNegative = false }) {
+  const [displayVal, setDisplayVal] = useState(0);
+
+  useEffect(() => {
+    let startTime;
+    let animationFrame;
+    const startVal = displayVal;
+
+    const tick = (timestamp) => {
+      if (!startTime) startTime = timestamp;
+      const progress = Math.min((timestamp - startTime) / duration, 1);
+      
+      // Easing function for a nice slow-down effect at the end (easeOutQuart)
+      const ease = 1 - Math.pow(1 - progress, 4);
+      const current = startVal + (value - startVal) * ease;
+      
+      setDisplayVal(current);
+
+      if (progress < 1) {
+        animationFrame = requestAnimationFrame(tick);
+      } else {
+        setDisplayVal(value); // Ensure it ends exactly on the target
+      }
+    };
+
+    animationFrame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [value, duration]);
+
+  const color = isNegative ? "#ff3a5c" : displayVal > 0 ? "#39ff84" : "#c8d8f0";
+
+  return (
+    <span style={{ color, fontVariantNumeric: "tabular-nums" }}>
+      {prefix}{displayVal.toFixed(decimals)}
+    </span>
   );
 }
 
@@ -41,11 +79,16 @@ function AuditorResultRow({ r }) {
       <span style={{ fontFamily: "DM Mono", color: "#c8d8f0", width: 40, textAlign: "right" }}>
         {(r.confidence * 100).toFixed(1)}%
       </span>
-      <span style={{ fontFamily: "DM Mono", width: 46, textAlign: "right", color: r.reputationDelta >= 0 ? "#39ff84" : "#ff3a5c" }}>
-        {r.reputationDelta >= 0 ? "+" : ""}{r.reputationDelta?.toFixed(2)}
+      <span style={{ fontFamily: "DM Mono", width: 46, textAlign: "right" }}>
+        <AnimatedNumber 
+          value={r.reputationDelta} 
+          decimals={2} 
+          prefix={r.reputationDelta > 0 ? "+" : ""} 
+          isNegative={r.reputationDelta < 0} 
+        />
       </span>
       <span style={{ fontFamily: "DM Mono", width: 56, textAlign: "right", color: aligned ? "#c8d8f0" : "#4a6080" }}>
-        {r.totalReceived.toFixed(3)} ◎
+        <AnimatedNumber value={r.totalReceived} decimals={3} /> ◎
       </span>
       <span style={{
         fontFamily: "Orbitron", fontSize: 7, letterSpacing: "0.06em",
@@ -116,7 +159,7 @@ export default function ReceiptPanel({ selectedEvent, auditorResults }) {
                 <span>Drop <span style={{ color: "#c8d8f0" }}>{drop_votes}/{total_votes}</span></span>
                 <span>Conf <span style={{ color: "#c8d8f0" }}>{(anomaly_confidence * 100).toFixed(1)}%</span></span>
                 <span>Aligned <span style={{ color: "#c8d8f0" }}>{alignedCount}/{total_votes}</span></span>
-                <span>Paid <span style={{ color: "#c8d8f0" }}>{totalPaid.toFixed(3)} ◎</span></span>
+                <span>Paid <span style={{ color: "#c8d8f0" }}><AnimatedNumber value={totalPaid || 0} decimals={3} /> ◎</span></span>
               </div>
             </div>
           </div>

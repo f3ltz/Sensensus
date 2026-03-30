@@ -41,7 +41,7 @@ function TransporterSelector({ agents, transporterIds, selected, onSelect }) {
   );
 }
 
-function TopologyCanvas({ agents, selectedTransporter, transporterIds, activeQuorumIds }) {
+function TopologyCanvas({ agents, selectedTransporter, transporterIds, activeQuorumIds, streamingQuorumIds }) {
   const svgRef = useRef(null);
   const [size, setSize] = useState({ w: 280, h: 200 });
 
@@ -89,9 +89,13 @@ function TopologyCanvas({ agents, selectedTransporter, transporterIds, activeQuo
       {/* Auditor nodes */}
       {auditors.map((a, i) => {
         const angle  = (i / Math.max(auditors.length, 1)) * Math.PI * 2 - Math.PI / 2;
+        const hubRadius = 18; // Change to 20 if you want a slight gap between the line and the circle
+        const startX = cx + hubRadius * Math.cos(angle);
+        const startY = cy + hubRadius * Math.sin(angle);
         const nx     = cx + r * Math.cos(angle);
         const ny     = cy + r * Math.sin(angle);
         const inLive = activeQuorumIds.has(a.id);
+        const isStreaming = streamingQuorumIds.has(a.id);
         const color  = a.isBlacklisted ? "#ff3a5c" : inLive ? "#f5a623" : a.reputation >= 0 ? "#39ff84" : "#f5a623";
         const radius = inLive ? 11 : 9;
         const acc    = a.totalAudits > 0 ? Math.round((a.correctAudits / a.totalAudits) * 100) : null;
@@ -100,10 +104,18 @@ function TopologyCanvas({ agents, selectedTransporter, transporterIds, activeQuo
 
         return (
           <g key={a.id}>
-            <line x1={cx} y1={cy} x2={nx} y2={ny}
+            <line x1={startX} y1={startY} x2={nx} y2={ny}
               stroke={color} strokeWidth={inLive ? 1 : 0.4}
               strokeDasharray={inLive ? "none" : "3 3"}
               opacity={inLive ? 0.7 : 0.2} />
+            {isStreaming && (
+              <line x1={startX} y1={startY} x2={nx} y2={ny}
+                stroke="#f5a623" strokeWidth="1.5" strokeLinecap="round"
+                className="data-packet-stream"
+                opacity="0.9" />
+            )}
+
+            {/* Pulse ring for active nodes */}
             {inLive && (
               <circle cx={nx} cy={ny} r={radius + 5}
                 fill="none" stroke={color} strokeWidth="0.5" opacity="0.35" />
@@ -147,6 +159,7 @@ export default function NetworkTopology({
   selectedTransporter,
   onSelectTransporter,
   activeQuorumIds,
+  streamingQuorumIds,
   lastOk,
   error,
 }) {
@@ -170,6 +183,7 @@ export default function NetworkTopology({
             selectedTransporter={selectedTransporter}
             transporterIds={transporterIds}
             activeQuorumIds={activeQuorumIds}
+            streamingQuorumIds={streamingQuorumIds}
           />
         </div>
       </div>

@@ -49,17 +49,61 @@ export default function App() {
   }, [selectedEvent?.event_id]);
 
   // Which auditors are active in a quorum right now (for topology)
-  const activeQuorumIds = new Set(
-    pendingMeta.flatMap((m) =>
-      Object.keys(pendingVerdicts[m.eventId] ?? {})
-    )
-  );
+  // Which auditors are active in a quorum right now (for topology)
+  const activeQuorumIds = new Set();
+  const streamingQuorumIds = new Set();
+
+  pendingMeta.forEach((m) => {
+    // If a transporter is selected globally, filter out other transporters' events
+    if (selectedTransporter && m.transporterId !== selectedTransporter) return;
+
+    const vMap = pendingVerdicts[m.eventId] ?? {};
+    const qIds = Object.keys(vMap);
+    
+    // 1. Highlight them as part of an active pending event
+    qIds.forEach((id) => activeQuorumIds.add(id));
+
+    const depositCount = Object.values(vMap).filter((v) => v.hasDeposit).length;
+    const verdictCount = Object.values(vMap).filter((v) => !v.silent).length;
+
+    // 2. Only trigger Data Packets during the VERDICTS phase 
+    // (Deposits >= Quorum, but Verdicts < Quorum)
+    if (m.quorumSize > 0 && depositCount >= m.quorumSize && verdictCount < m.quorumSize) {
+      qIds.forEach((id) => streamingQuorumIds.add(id));
+    }
+  });
 
   const hasPending = pendingMeta.length > 0;
 
   const selectedAuditorResults = selectedEvent
     ? (auditorCache[selectedEvent.event_id] ?? null)
     : null;
+
+  // --- SPOTLIGHT NEW EVENTS ---
+  const latestEvent = events[0] ?? null;
+  // If the event finished in the last 15 seconds, flag it as "Recent"
+  const isLatestRecent = latestEvent && (Date.now() / 1000 - latestEvent.finalized_at < 15);
+
+  // Auto-fetch results for the recent event so we can show the floating deltas
+  useEffect(() => {
+    if (isLatestRecent) fetchAuditorResults(latestEvent.event_id);
+  }, [latestEvent?.event_id, isLatestRecent]);
+
+  // Extract the specific nodes involved and their reputation changes
+  const latestResults = isLatestRecent ? (auditorCache[latestEvent.event_id] || []) : [];
+  const highlightedIds = new Set();
+  const recentDeltas = {};
+
+  if (isLatestRecent) {
+    highlightedIds.add(latestEvent.transporter_id);
+    if (latestEvent.transporter_slashed) recentDeltas[latestEvent.transporter_id] = -5.0; // Transporter penalty
+
+    latestResults.forEach((r) => {
+      highlightedIds.add(r.auditorId);
+      recentDeltas[r.auditorId] = r.reputationDelta;
+    });
+  }
+  // ----------------------------
 
   return (
     <div className="dash-root">
@@ -90,6 +134,7 @@ export default function App() {
         selectedTransporter={selectedTransporter}
         onSelectTransporter={setSelectedTransporter}
         activeQuorumIds={activeQuorumIds}
+        streamingQuorumIds={streamingQuorumIds}
         lastOk={lastOk}
         error={error}
       />
@@ -117,6 +162,8 @@ export default function App() {
         <ReputationPanel
           agents={agents}
           transporterIds={transporterIds}
+          highlightedIds={highlightedIds}
+          recentDeltas={recentDeltas}
           lastOk={lastOk}
           error={error}
         />
