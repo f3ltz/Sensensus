@@ -16,6 +16,7 @@ struct AuditorEntry {
 struct BidEntry {
     char     pubkey_hex[PUBKEY_HEX_LEN + 1];
     char     ip[20];
+    uint16_t port;
     double   price;
     float    rep;    // queried from Flow (0.0 if FLOW_ENABLED=0)
     float    stake;  // queried from Flow (0.0 if FLOW_ENABLED=0)
@@ -34,6 +35,7 @@ struct QuorumEntry {
     char    pubkey_hex[PUBKEY_HEX_LEN + 1];
     uint8_t pubkey[PUBKEY_BYTES];
     char    ip[20];
+    uint16_t port;
 };
 
 // ── Globals accessible from main / network ───────────────────────────────────

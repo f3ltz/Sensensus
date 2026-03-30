@@ -66,7 +66,7 @@ void gateway_init(const uint8_t *priv_32) {
     extern char          g_pubHex[];  // set in main.cpp after key generation
 
     Serial.println("[GW] Registering node on Flow testnet...");
-    bool ok = flow_tx_register_node(g_pubHex, /*stake=*/10.0);
+    bool ok = flow_tx_register_node(g_pubHex, /*stake=*/INITIAL_TRANSPORTER_STAKE);
     if (!ok) Serial.println("[GW] registerNode failed (may already be registered — continuing)");
 #else
     (void)priv_32;

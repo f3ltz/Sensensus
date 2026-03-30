@@ -39,7 +39,7 @@ typedef enum {
 #define BID_WINDOW_MS      600
 #endif
 #ifndef DELIVERY_TIMEOUT_MS
-#define DELIVERY_TIMEOUT_MS 180000
+#define DELIVERY_TIMEOUT_MS 60000
 #endif
 
 // IMU / inference
