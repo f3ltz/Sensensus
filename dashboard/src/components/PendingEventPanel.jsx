@@ -87,9 +87,10 @@ function VerdictRow({ auditorId, data }) {
 }
 
 export default function PendingEventPanel({ pendingMeta, pendingVerdicts, selectedTransporter }) {
-  const visible = selectedTransporter
-    ? pendingMeta.filter((m) => m.transporterId === selectedTransporter)
-    : pendingMeta;
+  const visible = (selectedTransporter
+  ? pendingMeta.filter((m) => m.transporterId === selectedTransporter)
+  : pendingMeta
+	).sort((a, b) => b.registeredAt - a.registeredAt);  // ← newest first
 
   // Show the most recently registered pending event
   const [selectedIdx, setSelectedIdx] = useState(0);
