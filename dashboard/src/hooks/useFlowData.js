@@ -178,11 +178,14 @@ export function useFlowData(flowAddr, refreshKey, intervalMs = 8000) {
       }
     } catch (_) {}
   }, [auditorCache]);
+  
+  const settledIds = new Set(events.map((e) => e.event_id));
+  const activePendingMeta = pendingMeta.filter((m) => !settledIds.has(m.eventId));
 
   return {
     agents,
     events,
-    pendingMeta,
+    pendingMeta: activePendingMeta,
     pendingVerdicts,
     transporterIds,
     auditorCache,
