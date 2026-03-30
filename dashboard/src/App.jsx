@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { injectFonts, injectStyles } from "./styles.js";
 import { useFlowData } from "./hooks/useFlowData.js";
 import TopBar           from "./components/TopBar.jsx";
@@ -66,7 +66,7 @@ export default function App() {
     const depositCount = Object.values(vMap).filter((v) => v.hasDeposit).length;
     const verdictCount = Object.values(vMap).filter((v) => !v.silent).length;
 
- 
+  
     // 2. Only trigger Data Packets during the VERDICTS phase 
     // (Deposits >= Quorum, but Verdicts < Quorum)
     if (m.quorumSize > 0 && depositCount >= m.quorumSize && verdictCount < m.quorumSize) {
@@ -87,28 +87,40 @@ export default function App() {
 
   // --- SPOTLIGHT NEW EVENTS ---
   const latestEvent = events[0] ?? null;
-  // If the event finished in the last 15 seconds, flag it as "Recent"
-  const isLatestRecent = latestEvent && (Date.now() / 1000 - latestEvent.finalized_at < 15);
+  const [isLatestRecent, setIsLatestRecent] = useState(false);
+  const lastSeenRef = useRef(null);
 
-  // Auto-fetch results for the recent event so we can show the floating deltas
   useEffect(() => {
-    if (isLatestRecent) fetchAuditorResults(latestEvent.event_id);
-  }, [latestEvent?.event_id, isLatestRecent]);
+    if (!latestEvent) return;
+
+    // Trigger the animation if the event ID is different from what we last saw.
+    // Because lastSeenRef starts as null, this will ALWAYS run on page load!
+    if (lastSeenRef.current !== latestEvent.event_id) {
+      setIsLatestRecent(true);
+      fetchAuditorResults(latestEvent.event_id);
+      
+      // Turn off the animation flags after 5 seconds so they can be re-triggered later
+      const timer = setTimeout(() => setIsLatestRecent(false), 5000);
+      lastSeenRef.current = latestEvent.event_id;
+      return () => clearTimeout(timer);
+    }
+  }, [latestEvent?.event_id]);
 
   // Extract the specific nodes involved and their reputation changes
   const latestResults = isLatestRecent ? (auditorCache[latestEvent.event_id] || []) : [];
   const highlightedIds = new Set();
   const recentDeltas = {};
 
-  if (isLatestRecent) {
+  if (isLatestRecent && latestEvent) {
     highlightedIds.add(latestEvent.transporter_id);
-    if (latestEvent.transporter_slashed) recentDeltas[latestEvent.transporter_id] = -5.0; // Transporter penalty
+    if (latestEvent.transporter_slashed) recentDeltas[latestEvent.transporter_id] = -5.0;
 
     latestResults.forEach((r) => {
       highlightedIds.add(r.auditorId);
       recentDeltas[r.auditorId] = r.reputationDelta;
     });
   }
+  // ----------------------------
   // ----------------------------
 
   return (
