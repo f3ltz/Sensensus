@@ -300,16 +300,20 @@ const CSS = `
   .flash-highlight { animation: flash-new-row 4s ease-out forwards; }
 
   @keyframes float-up-fade {
-    0%   { opacity: 0; transform: translateY(0px) scale(0.8); }
-    15%  { opacity: 1; transform: translateY(-8px) scale(1.1); }
-    80%  { opacity: 1; transform: translateY(-16px) scale(1); }
-    100% { opacity: 0; transform: translateY(-24px) scale(0.9); }
+    /* Changed to slide horizontally and slightly up so it stays within the row bounds */
+    0%   { opacity: 0; transform: translate(0px, 0px) scale(0.8); }
+    15%  { opacity: 1; transform: translate(12px, -2px) scale(1.1); }
+    80%  { opacity: 1; transform: translate(18px, -4px) scale(1); }
+    100% { opacity: 0; transform: translate(24px, -6px) scale(0.9); }
   }
   .delta-float {
-    position: absolute; right: 0; bottom: 100%;
+    /* Anchor it to the right edge of the reputation bar instead of the top */
+    position: absolute; left: 100%; top: -2px;
     font-family: var(--font-data); font-size: 11px; font-weight: bold;
     animation: float-up-fade 4s ease-out forwards;
     z-index: 10; pointer-events: none;
+    white-space: nowrap;
+    margin-left: 6px; /* Give it a little breathing room from the rep numbers */
   }
   .delta-float.positive { color: var(--green); text-shadow: 0 0 6px rgba(57,255,132,0.6); }
   .delta-float.negative { color: var(--red); text-shadow: 0 0 6px rgba(255,58,92,0.6); }

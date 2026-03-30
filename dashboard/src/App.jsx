@@ -66,10 +66,16 @@ export default function App() {
     const depositCount = Object.values(vMap).filter((v) => v.hasDeposit).length;
     const verdictCount = Object.values(vMap).filter((v) => !v.silent).length;
 
+ 
     // 2. Only trigger Data Packets during the VERDICTS phase 
     // (Deposits >= Quorum, but Verdicts < Quorum)
     if (m.quorumSize > 0 && depositCount >= m.quorumSize && verdictCount < m.quorumSize) {
-      qIds.forEach((id) => streamingQuorumIds.add(id));
+      qIds.forEach((id) => {
+        // Only stream data to auditors who haven't locked in a verdict yet
+        if (vMap[id]?.silent !== false) {
+          streamingQuorumIds.add(id);
+        }
+      });
     }
   });
 
