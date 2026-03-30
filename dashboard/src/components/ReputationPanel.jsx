@@ -120,11 +120,14 @@ export default function ReputationPanel({ agents, transporterIds, lastOk, error 
       </div>
 
       {/* Column headers */}
-      <div style={{ display: "flex", gap: 8, padding: "2px 20px 4px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-        {[["NODE ID", "flex: 1"], ["REP", "width: 60px; textAlign: right"], ["STAKE◎", "width: 56px; textAlign: right"], ["ESC◎", "width: 52px; textAlign: right"], ["ACC", "width: 36px; textAlign: right"]].map(([h]) => (
-          <span key={h} style={{ fontFamily: "Orbitron", fontSize: 7, color: "#1a2540", letterSpacing: "0.1em" }}>{h}</span>
-        ))}
-      </div>
+      
+<div style={{ display: "flex", gap: 8, padding: "2px 8px 4px 12px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+  <span style={{ fontFamily: "Orbitron", fontSize: 7, color: "#4a6080", letterSpacing: "0.1em", flex: 1 }}>NODE ID</span>
+  <span style={{ fontFamily: "Orbitron", fontSize: 7, color: "#4a6080", letterSpacing: "0.1em", width: 60, textAlign: "right" }}>REP</span>
+  <span style={{ fontFamily: "Orbitron", fontSize: 7, color: "#4a6080", letterSpacing: "0.1em", width: 56, textAlign: "right" }}>STAKE◎</span>
+  <span style={{ fontFamily: "Orbitron", fontSize: 7, color: "#4a6080", letterSpacing: "0.1em", width: 52, textAlign: "right" }}>ESC◎</span>
+  <span style={{ fontFamily: "Orbitron", fontSize: 7, color: "#4a6080", letterSpacing: "0.1em", width: 36, textAlign: "right" }}>ACC</span>
+</div>
 
       {agents.length === 0 ? (
         <div className="no-data" style={{ flex: 1 }}>

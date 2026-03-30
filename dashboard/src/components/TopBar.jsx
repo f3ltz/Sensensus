@@ -33,7 +33,7 @@ export default function TopBar({
 
   return (
     <div className="topbar">
-      <div className="logo">SWARM<span>VERIFIER</span></div>
+      <div className="logo">SEN<span>SENSUS</span></div>
       <div className="topbar-divider" />
 
       {/* System state */}
