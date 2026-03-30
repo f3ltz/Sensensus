@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { shortKey, fmtDuration } from "../utils.js";
+import { shortKey, fmtDuration, getNodeAlias } from "../utils.js";
 
 const PHASES = ["REGISTER", "DEPOSIT", "VERDICTS", "FINALIZE"];
 
@@ -72,7 +72,7 @@ function VerdictRow({ auditorId, data }) {
       )}
 
       <span style={{ fontFamily: "DM Mono", fontSize: 9, color: "#4a6080", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {shortKey(auditorId)}
+        {getNodeAlias(auditorId, "Auditor")}
       </span>
 
       {silent ? (

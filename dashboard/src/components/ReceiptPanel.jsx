@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { shortKey, fmtTime, copyToClipboard } from "../utils.js";
+import { shortKey, fmtTime, copyToClipboard, getNodeAlias } from "../utils.js";
 
 function CopyField({ label, value }) {
   const [copied, setCopied] = useState(false);
@@ -33,7 +33,7 @@ function AuditorResultRow({ r }) {
       fontSize: 9, marginBottom: 2,
     }}>
       <span style={{ fontFamily: "DM Mono", color: "#4a6080", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {shortKey(r.auditorId)}
+        {getNodeAlias(r.auditorId, "Auditor")}
       </span>
       <div className={`verdict-badge ${r.verdict ? "badge-drop" : "badge-normal"}`}>
         {r.verdict ? "DROP" : "NORM"}
@@ -100,7 +100,7 @@ export default function ReceiptPanel({ selectedEvent, auditorResults }) {
                 {drop ? "DROP CONFIRMED" : "NO ANOMALY"}
               </div>
               <div style={{ fontFamily: "DM Mono", fontSize: 9, color: "#4a6080", marginTop: 2 }}>
-                {shortKey(transporter_id)}
+                {getNodeAlias(transporter_id, "Transporter")}
                 {transporter_slashed && <span style={{ color: "#ff3a5c", marginLeft: 8 }}>⚡ SLASHED</span>}
               </div>
             </div>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { shortKey, clamp } from "../utils.js";
+import { shortKey, clamp, getNodeAlias } from "../utils.js";
 
 function TransporterSelector({ agents, transporterIds, selected, onSelect }) {
   const tSet         = new Set(transporterIds);
@@ -24,7 +24,7 @@ function TransporterSelector({ agents, transporterIds, selected, onSelect }) {
           >
             <span className="node-role role-transporter">T</span>
             <span style={{ fontFamily: "DM Mono", fontSize: 9, color: selected === a.id ? "#f5a623" : "#c8d8f0", flex: 1 }}>
-              {shortKey(a.id)}
+              {getNodeAlias(a.id, "Transporter")}
             </span>
             <span style={{ fontFamily: "DM Mono", fontSize: 9, color: a.reputation >= 0 ? "#39ff84" : "#f5a623" }}>
               {a.reputation >= 0 ? "+" : ""}{a.reputation.toFixed(1)}R
@@ -76,8 +76,8 @@ function TopologyCanvas({ agents, selectedTransporter, transporterIds, activeQuo
       <circle cx={cx} cy={cy} r={30} fill="url(#tglow)" />
       <circle cx={cx} cy={cy} r={18} fill="#0b0f1a" stroke="#f5a623" strokeWidth="1.5" />
       <text x={cx} y={cy - 4} textAnchor="middle" dominantBaseline="middle"
-        fill="#f5a623" fontSize="7" fontFamily="Orbitron">
-        {selectedTransporter ? selectedTransporter.slice(0, 6) : "ALL"}
+        fill="#f5a623" fontSize="12" fontFamily="Orbitron">
+        {selectedTransporter ? getNodeAlias(selectedTransporter, "Transporter").split('-')[1] : "ALL"}
       </text>
       <text x={cx} y={cy + 6} textAnchor="middle" dominantBaseline="middle"
         fill="#8a5e13" fontSize="6" fontFamily="Share Tech Mono">
@@ -95,6 +95,8 @@ function TopologyCanvas({ agents, selectedTransporter, transporterIds, activeQuo
         const color  = a.isBlacklisted ? "#ff3a5c" : inLive ? "#f5a623" : a.reputation >= 0 ? "#39ff84" : "#f5a623";
         const radius = inLive ? 11 : 9;
         const acc    = a.totalAudits > 0 ? Math.round((a.correctAudits / a.totalAudits) * 100) : null;
+        const alias = getNodeAlias(a.id, "Auditor");
+        const shortName = alias.split('-')[1];
 
         return (
           <g key={a.id}>
@@ -109,8 +111,8 @@ function TopologyCanvas({ agents, selectedTransporter, transporterIds, activeQuo
             <circle cx={nx} cy={ny} r={radius}
               fill="#0b0f1a" stroke={color} strokeWidth={inLive ? 2 : 1.5} />
             <text x={nx} y={ny + 1} textAnchor="middle" dominantBaseline="middle"
-              fill={color} fontSize="6" fontFamily="Share Tech Mono">
-              {a.id.slice(0, 4)}
+              fill={color} fontSize="9" fontFamily="Share Tech Mono">
+              {shortName}
             </text>
             {/* Accuracy below node */}
             {acc !== null && (

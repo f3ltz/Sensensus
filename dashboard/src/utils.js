@@ -54,3 +54,25 @@ export function computeStats(events) {
     totalEvents: events.length,
   };
 }
+
+const aliasCache = {};
+let tCount = 1;
+let aCount = 1;
+
+export function getNodeAlias(id, role = "Auditor") {
+  if (!id) return "—";
+
+  if (aliasCache[id]) {
+    if (role === "Transporter" && aliasCache[id].startsWith("Auditor")) {
+      aliasCache[id] = `Transporter-${tCount++}`;
+    }
+    return aliasCache[id];
+  }
+ 
+  if (role === "Transporter") {
+    aliasCache[id] = `Transporter-${tCount++}`;
+  } else {
+    aliasCache[id] = `Auditor-${String.fromCharCode(64 + aCount++)}`; 
+  }
+  return aliasCache[id];
+}

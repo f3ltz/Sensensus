@@ -1,9 +1,9 @@
-import { computeStats, shortKey } from "../utils.js";
+import { computeStats, shortKey, getNodeAlias } from "../utils.js";
 
-function Stat({ label, value, color }) {
+function Stat({ label, value, color, tooltip }) {
   return (
-    <div className="topbar-stat">
-      <div className="topbar-stat-label">{label}</div>
+    <div className="topbar-stat" title={tooltip} style={{ cursor: tooltip ? "help" : "default" }}>
+      <div className="topbar-stat-label" style={{ borderBottom: tooltip ? "1px dotted #4a6080" : "none" }}>{label}</div>
       <div className="topbar-stat-value" style={color ? { color } : undefined}>{value}</div>
     </div>
   );
@@ -50,14 +50,14 @@ export default function TopBar({
       <div className="topbar-divider" />
 
       {/* Derived stats */}
-      <Stat label="DROP RATE"   value={events.length ? `${stats.dropRate.toFixed(0)}%` : "—"} color={stats.dropRate > 50 ? "#ff3a5c" : "#4fc3f7"} />
-      <Stat label="AVG CSWARM" value={events.length ? `${stats.avgCswarm.toFixed(1)}%` : "—"} />
-      <Stat label="SLASHES"    value={stats.slashCount} color={stats.slashCount > 0 ? "#ff3a5c" : undefined} />
+      <Stat label="DROP RATE" tooltip="Percentage of events flagged as anomalies and dropped"  value={events.length ? `${stats.dropRate.toFixed(0)}%` : "—"} color={stats.dropRate > 50 ? "#ff3a5c" : "#4fc3f7"} />
+      <Stat label="AVG CSWARM" tooltip="Confidence Swarm: The network's average certainty level across all verdicts" value={events.length ? `${stats.avgCswarm.toFixed(1)}%` : "—"} />
+      <Stat label="SLASHES" tooltip="Number of times a Transporter was penalized for malicious behavior"   value={stats.slashCount} color={stats.slashCount > 0 ? "#ff3a5c" : undefined} />
       <div className="topbar-divider" />
 
       {selectedTransporter && (
         <>
-          <Stat label="WATCHING" value={shortKey(selectedTransporter)} color="#f5a623" />
+          <Stat label="WATCHING" value={getNodeAlias(selectedTransporter, "Transporter")} color="#f5a623" />
           <div className="topbar-divider" />
         </>
       )}

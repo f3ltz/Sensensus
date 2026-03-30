@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { clamp, shortKey, copyToClipboard } from "../utils.js";
+import { clamp, shortKey, copyToClipboard, getNodeAlias } from "../utils.js";
 
 const SORT_OPTIONS = [
   { key: "reputation", label: "REP" },
@@ -7,6 +7,7 @@ const SORT_OPTIONS = [
   { key: "accuracy",   label: "ACC%" },
   { key: "audits",     label: "AUDITS" },
 ];
+
 
 function AgentDrawer({ agent, transporterIds }) {
   const [copied, setCopied] = useState(false);
@@ -20,6 +21,7 @@ function AgentDrawer({ agent, transporterIds }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
+  
 
   return (
     <div className="agent-drawer">
@@ -31,7 +33,13 @@ function AgentDrawer({ agent, transporterIds }) {
           {copied ? "✓ COPIED" : "COPY"}
         </button>
       </div>
-      <div className="agent-drawer-pubkey">{agent.id}</div>
+      <div className="agent-drawer-pubkey">
+        <strong style={{ color: "#c8d8f0", fontSize: "10px" }}>
+          {getNodeAlias(agent.id, isAuditor ? "Auditor" : "Transporter")}
+        </strong>
+        <br />
+        <span style={{ opacity: 0.6 }}>{agent.id}</span>
+      </div>
       <div className="agent-drawer-stats">
         <div className="agent-stat">
           <span className="agent-stat-label">REPUTATION</span>
@@ -143,7 +151,8 @@ export default function ReputationPanel({ agents, transporterIds, lastOk, error 
             const barW      = clamp((rep + 100) / 200 * 100, 0, 100);
             const acc       = a.totalAudits > 0 ? Math.round((a.correctAudits / a.totalAudits) * 100) : null;
             const isExpanded = expandedId === a.id;
-
+            const role = isAuditor ? "Auditor" : "Transporter";
+            const alias = getNodeAlias(a.id, role);
             return (
               <div
                 key={a.id}
@@ -151,8 +160,10 @@ export default function ReputationPanel({ agents, transporterIds, lastOk, error 
                 onClick={() => setExpandedId(isExpanded ? null : a.id)}
                 title="Click to expand"
               >
-                <span className="rep-pubkey">{shortKey(a.id)}</span>
-
+                <div className="rep-pubkey" title={`Full ID: ${a.id}`} style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ color: "var(--text)", fontSize: "10px" }}>{alias}</span>
+                  <span style={{ fontSize: "7px", opacity: 0.5 }}>{shortKey(a.id, 5, 4)}</span>
+                </div>
                 <div className="rep-bar-container">
                   <span className="rep-val" style={{ color: repColor }}>
                     {rep >= 0 ? "+" : ""}{rep.toFixed(1)}
