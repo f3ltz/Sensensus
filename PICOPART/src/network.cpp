@@ -453,7 +453,7 @@ static void _handle_POST_pay(WiFiClient &cli, const char *json_body) {
     cli.printf("\",\"payload\":%s}", payload_json);
 
     Serial.printf("[HTTP] 200 /pay  pub=...%s  deposit=%.2f\n",
-                  pub_hex + PUBKEY_HEX_LEN - 12, deposit_amount);
+                  pub_hex + PUBKEY_HEX_LEN - 12, DEPOSIT_AMOUNT);
 }
 
 static void _handle_POST_verdict(WiFiClient &cli, const char *json_body) {
