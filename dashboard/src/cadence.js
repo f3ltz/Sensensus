@@ -166,10 +166,12 @@ access(all) fun main(): [PendingMeta] {
   var rows: [PendingMeta] = []
   for id in SwarmVerifierV4.pendingEvents.keys {
     let e = SwarmVerifierV4.pendingEvents[id]!
-    rows.append(PendingMeta(eventId:id,transporterId:e.transporterId,
-      quorumSize:e.quorumIds.length,verdictCount:e.verdicts.length,
-      depositCount:e.deposits.length,registeredAt:e.registeredAt))
-  }
+    if !e.finalized {
+      rows.append(PendingMeta(eventId:id,transporterId:e.transporterId,
+        quorumSize:e.quorumIds.length,verdictCount:e.verdicts.length,
+        depositCount:e.deposits.length,registeredAt:e.registeredAt))
+    }
+  } 
   return rows
 }`.trim();
 

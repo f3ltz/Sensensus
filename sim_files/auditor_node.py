@@ -42,6 +42,7 @@ import asyncio
 import hashlib
 import io
 import os
+import select
 import socket
 import struct
 import threading
@@ -163,6 +164,7 @@ class AuditorNode:
     def __init__(
         self,
         key_path:           str   = "./identity.pem",
+        port:               int   = MULTICAST_PORT,
         bid_price:          float = 1.0,
         deposit:            float = DEPOSIT_AMOUNT,
         flow_api_url:       str   = FLOW_API_URL_DEFAULT,
@@ -180,6 +182,7 @@ class AuditorNode:
         self.flow_api_url       = flow_api_url.rstrip('/')
         self.flow_contract_addr = flow_contract_addr
         self.flow_enabled       = flow_enabled
+        self.port               = port
 
         # ── Per-event state ───────────────────────────────────────────────────
         # All fields protected by _state_lock.
@@ -202,6 +205,11 @@ class AuditorNode:
         # ── Register on Flow testnet ──────────────────────────────────────────
         if self.flow_enabled:
             self._register_on_flow()
+
+        self.unicast_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.unicast_sock.bind(('', self.port))
+        # Allow it to send multicast beacons too
+        self.unicast_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
 
         print(f"[*] Auditor ready. pubkey={self.pub_hex[12:]}...")
         print(f"[*] Bid price:   {self.bid_price} FLOW")
@@ -250,8 +258,6 @@ class AuditorNode:
           bytes  1-64 : pubkey (X‖Y, 64 raw bytes)
           bytes 65-128: ECDSA-P256/SHA-256 sig over bytes[0:65]
         """
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
 
         header = bytes([0x01]) + self.pub_bytes              # 65 bytes
         sig    = self._sign(header)                          # 64 bytes
@@ -261,7 +267,7 @@ class AuditorNode:
         print(f"[Beacon] Broadcasting to {MULTICAST_GROUP}:{MULTICAST_PORT} every {BEACON_INTERVAL_S}s")
         while True:
             try:
-                sock.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
+                self.unicast_sock.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
             except Exception as e:
                 print(f"[Beacon] Send error: {e}")
             time.sleep(BEACON_INTERVAL_S)
@@ -288,14 +294,16 @@ class AuditorNode:
 
         while True:
             try:
-                data, addr = sock.recvfrom(1024)
-                if not data:
-                    continue
-                pkt_type = data[0]
-                if   pkt_type == 0x03 and len(data) == 133:
-                    self._handle_anomaly(data, addr)
-                elif pkt_type == 0x04 and len(data) == 129:
-                    self._handle_quorum(data, addr)
+                readable, _, _ = select.select([sock, self.unicast_sock], [], [])
+                for sock in readable:
+                    data, addr = sock.recvfrom(1024)
+                    if not data: continue
+                    
+                    pkt_type = data[0]
+                    if   pkt_type == 0x03 and len(data) == 133:
+                        self._handle_anomaly(data, addr)
+                    elif pkt_type == 0x04 and len(data) == 129:
+                        self._handle_quorum(data, addr)
                 # 0x01 (beacon echo) and 0x02 (bids) are ignored
             except Exception as e:
                 print(f"[Listen] Error: {e}")
@@ -361,12 +369,10 @@ class AuditorNode:
         assert len(packet) == 137
 
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             # Send 3 times to handle UDP drop
             for attempt in range(3):
-                sock.sendto(packet, (transporter_ip, BID_PORT))
+                self.unicast_sock.sendto(packet, (transporter_ip, BID_PORT))
                 time.sleep(0.3)
-            sock.close()
             print(f"[Bid] Sent {self.bid_price} FLOW bid to {transporter_ip}:{BID_PORT}")
         except Exception as e:
             print(f"[Bid] Send error: {e}")
@@ -771,7 +777,7 @@ class AuditorNode:
 
             except Exception as e:
                 err = str(e)
-                if "already registered" in err:
+                if "already registered" in err.lower():
                     print("[Flow] Auditor already registered on-chain — skipping.")
                     return
                 if "sequence number" in err and attempt < 2:
@@ -790,6 +796,8 @@ def main():
     parser = argparse.ArgumentParser(description="SwarmVerifier Auditor Node")
     parser.add_argument("--key-file",  default="./identity.pem",
                         help="Path to PEM file for auditor identity (created if absent).")
+    parser.add_argument("--port", type=int, default=5011,
+                        help="Unicast UDP port for this auditor.")
     parser.add_argument("--bid-price", type=float, default=1.0,
                         help="FLOW tokens to bid per verification job.")
     parser.add_argument("--deposit",   type=float, default=DEPOSIT_AMOUNT,
@@ -812,6 +820,7 @@ def main():
 
     node = AuditorNode(
         key_path           = args.key_file,
+        port               = args.port,
         bid_price          = args.bid_price,
         deposit            = args.deposit,
         flow_api_url       = args.flow_url,

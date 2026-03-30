@@ -119,10 +119,10 @@ static void _handle_beacon(const uint8_t *pkt, const char *src_ip) {
 }
 
 // ── PKT_BID handler (0x02, 137 bytes) ────────────────────────────────────────
-static void _handle_bid(const uint8_t *pkt, const char *src_ip) {
-    Serial.printf("[UDP] _handle_bid called from %s collecting=%d\n", 
-                  src_ip, g_collectingBids);  // add this
-    
+static void _handle_bid(const uint8_t *pkt, const char *src_ip, uint16_t src_port) {
+    Serial.printf("[UDP] _handle_bid called from %s:%d collecting=%d\n", 
+                  src_ip, src_port, g_collectingBids);  // add this
+
     if (!g_collectingBids) {
         Serial.println("[UDP] Bid dropped — not collecting");  // add this
         return;
@@ -167,6 +167,7 @@ static void _handle_bid(const uint8_t *pkt, const char *src_ip) {
     BidEntry &b = g_bidPool[g_bidCount++];
     strlcpy(b.pubkey_hex, pub_hex, sizeof(b.pubkey_hex));
     strlcpy(b.ip, src_ip, sizeof(b.ip));
+    b.port = src_port;
     b.price = price;
     b.rep   = 0.0f;
     b.stake = 0.0f;
@@ -199,10 +200,12 @@ void net_handleUdp() {
         char src[20];
         _bidSock.remoteIP().toString().toCharArray(src, sizeof(src));
 
+        uint16_t src_port = _bidSock.remotePort();
+
         Serial.printf("[UDP] Bid packet: n=%d type=0x%02x from=%s\n", 
                   n, pkt[0], src);  // add this
 
-        if (n == 137 && pkt[0] == 0x02) _handle_bid(pkt, src);
+        if (n == 137 && pkt[0] == 0x02) _handle_bid(pkt, src, src_port);
         else Serial.printf("[UDP] Bid ignored: wrong size or type\n");  // add this
         }
     }
@@ -236,11 +239,11 @@ void net_sendQuorumNotify(const QuorumEntry *entry) {
     }
     IPAddress dst;
     dst.fromString(entry->ip);
-    _mcastSock.beginPacket(dst, MULTICAST_PORT);
+    _mcastSock.beginPacket(dst, entry->port);
     _mcastSock.write(pkt, 129);
     _mcastSock.endPacket();
-    Serial.printf("[Net] PKT_QUORUM → %s  pub=...%s\n",
-                  entry->ip, entry->pubkey_hex + PUBKEY_HEX_LEN - 12);
+    Serial.printf("[Net] PKT_QUORUM → %s:%d  pub=...%s\n",
+                  entry->ip, entry->port, entry->pubkey_hex + PUBKEY_HEX_LEN - 12);
 }
 
 // ── Quorum selection ──────────────────────────────────────────────────────────
@@ -272,6 +275,7 @@ int net_selectQuorum(const char */*transporter_pub_hex*/) {
         QuorumEntry &q = g_quorum[g_quorumSize++];
         strlcpy(q.pubkey_hex, g_bidPool[i].pubkey_hex, sizeof(q.pubkey_hex));
         strlcpy(q.ip,         g_bidPool[i].ip,         sizeof(q.ip));
+        q.port = g_bidPool[i].port;
         // Recover pubkey bytes from registry
         for (int k = 0; k < g_auditorCount; k++) {
             if (strcmp(g_auditorRegistry[k].pubkey_hex, q.pubkey_hex) == 0) {
@@ -279,8 +283,8 @@ int net_selectQuorum(const char */*transporter_pub_hex*/) {
                 break;
             }
         }
-        Serial.printf("[Quorum] %s  price=%.4f  score=%.4f\n",
-                      q.ip, g_bidPool[i].price, g_bidPool[i].score);
+        Serial.printf("[Quorum] %s:%d  price=%.4f  score=%.4f\n",
+                      q.ip, q.port, g_bidPool[i].price, g_bidPool[i].score);
     }
     return g_quorumSize;
 }
