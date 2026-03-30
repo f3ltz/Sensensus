@@ -317,34 +317,33 @@ class TransporterState:
         return _sign(self.sk, canonical).hex()
 
     def build_payload_json(self, auditor_pubkey_hex: str) -> dict:
-        """
-        Signed payload object inside the x402 200 response.
+        timestamp_ms = int(time.time() * 1000)
+        
+        # 1. Manually build the canonical string to strictly match Pico C++ format
+        canonical_str = (
+            f'{{"anomaly_confidence":{self.anomaly_confidence:.4f},'
+            f'"auditor_pubkey":"{auditor_pubkey_hex}",'
+            f'"event_id":"{self.current_event_id}",'
+            f'"timestamp_ms":{timestamp_ms},'
+            f'"transporter_pubkey":"{self.pub_hex}"}}'
+        )
+        sig_hex = _sign(self.sk, canonical_str.encode('utf-8')).hex()
 
-        Key names MUST match what auditor._execute_x402_fetch() reads:
-          payload.get("submission_sig")   ← stored as _current_event_id
-          payload.get("payload_signature") ← carried into _submit_verdict
-
-        payload_signature is per-auditor — it ties the auditor's verdict to
-        the specific data they received. The auditor includes this in their
-        verdict body so the contract can verify chain of custody.
-        """
+        # 2. Build the output body
         body = {
             "transporter_pubkey":  self.pub_hex,
             "auditor_pubkey":      auditor_pubkey_hex,
             "anomaly_confidence":  self.anomaly_confidence,
-            "timestamp_ms":        int(time.time() * 1000),
-            "event_id":      self.current_event_id,   # ← auditor reads this key
+            "timestamp_ms":        timestamp_ms,
+            "event_id":            self.current_event_id,
+            "payload_signature":   sig_hex,
+            "deposit":             0.5
         }
-        canonical = json.dumps(body, separators=(',', ':')).encode()
-        sig_hex   = _sign(self.sk, canonical).hex()
-        body["payload_signature"] = sig_hex
 
-        # Record so we can validate the auditor sends it back in their verdict
         with self.issued_payload_sigs_lock:
             self.issued_payload_sigs[auditor_pubkey_hex] = sig_hex
 
         return body
-
 
 state = TransporterState()
 
@@ -527,6 +526,11 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         # Invalidate nonce immediately — prevents replay
         with state.nonces_lock:
             state.nonces.pop(pubkey_hex, None)
+
+        if not _submit_deposit_on_flow(state.current_event_id, pubkey_hex):
+            print(f"[HTTP] POST /pay {client_ip} → 503 recordDeposit failed")
+            self._send_json(503, {"error": "Flow.recordDeposit() failed — deposit not locked on-chain"})
+            return
 
         print(f"[HTTP] POST /pay {client_ip} pubkey={pubkey_hex[:12]}... → 200 OK")
         payload = state.build_payload_json(pubkey_hex)
@@ -735,10 +739,20 @@ def _finalize_event():
     # ── Simulate post-consensus Storacha upload ───────────────────────────────
     print("[Storacha] Simulating post-consensus bundle upload...")
     time.sleep(0.3)   # simulate upload latency
-    cid     = "bafyrei" + secrets.token_hex(16)
-    flow_tx = "0x"    + secrets.token_hex(8)
+    cid = "bafyrei" + secrets.token_hex(16)
     print(f"[Storacha] CID={cid}")
-    print(f"[Flow]     updateEventCid → tx={flow_tx}")
+
+    # ===== NEW ON-CHAIN CALL =====
+    if FLOW_ENABLED and saved_event_id:
+        print("[Flow] Calling updateEventCid on-chain...")
+        threading.Thread(target=_update_cid_on_flow,
+                         args=(saved_event_id, cid), daemon=True).start()
+        flow_tx = "submitted" # Actual tx hash will be printed by the async tx runner
+    else:
+        flow_tx = "0x" + secrets.token_hex(8)
+        print(f"[Flow] (simulated) updateEventCid → tx={flow_tx}")
+    # =============================
+    
     print("═" * 64 + "\n")
 
     # ── Store finalized event for /state dashboard ────────────────────────────
@@ -1173,12 +1187,66 @@ def trigger_anomaly():
         state.nonces.clear()
     print("[Anomaly] Cycle complete, returning to IDLE\n")
 
+def _submit_deposit_on_flow(event_id: str, auditor_pub_hex: str) -> bool:
+    """Phase 1.5: recordDeposit on Flow. Blocks until sealed."""
+    if not FLOW_ENABLED:
+        print(f"[Flow] (simulated) recordDeposit(event_id={event_id[:16]}... auditor={auditor_pub_hex[:12]}...)")
+        return True
+
+    # Uses Python implicit string concatenation to avoid f-string curly brace escaping issues
+    cadence = (
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
+        "transaction(eventId: String, auditorId: String) {\n"
+        "    prepare(signer: &Account) {}\n"
+        "    execute {\n"
+        "        SwarmVerifierV4.recordDeposit(eventId: eventId, auditorId: auditorId)\n"
+        "    }\n"
+        "}"
+    )
+
+    def build(tx):
+        tx = tx.add_arguments(String(event_id))
+        tx = tx.add_arguments(String(auditor_pub_hex))
+        return tx
+
+    try:
+        with _flow_tx_lock:
+            # wait_seal=True is critical here to ensure deposit is locked before CSV is served
+            tx_id = asyncio.run(_flow_tx_async(cadence, build, "recordDeposit", wait_seal=True))
+            return tx_id is not None
+    except Exception as e:
+        print(f"[Flow] recordDeposit error: {e}")
+        return False
+    
+def _update_cid_on_flow(event_id: str, cid: str):
+    if not FLOW_ENABLED:
+        return
+
+    cadence = (
+        f"import SwarmVerifierV4 from {FLOW_CONTRACT_ADDR}\n"
+        "transaction(eventId: String, cid: String) {\n"
+        "    prepare(signer: &Account) {}\n"
+        "    execute { SwarmVerifierV4.updateEventCid(eventId: eventId, cid: cid) }\n"
+        "}"
+    )
+
+    def build(tx):
+        tx = tx.add_arguments(String(event_id))
+        tx = tx.add_arguments(String(cid))
+        return tx
+
+    try:
+        with _flow_tx_lock:
+            # fire-and-forget (wait_seal=False) matches Pico's implementation
+            asyncio.run(_flow_tx_async(cadence, build, "updateEventCid", wait_seal=False))
+    except Exception as e:
+        print(f"[Flow] updateEventCid error: {e}")
 
 _flow_tx_lock = threading.Lock()
 
 async def _flow_tx_async(script, build_args_fn, label, wait_seal=False):
-    flow_addr = os.environ.get("TESTNET_ADDRESS", "").removeprefix("0x")
-    flow_key  = os.environ.get("PRIVATE_KEY",  "").removeprefix("0x")
+    flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "").removeprefix("0x")
+    flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "").removeprefix("0x")
     if not flow_addr or not flow_key:
         print(f"[Flow] FLOW_ACCOUNT_ADDR/FLOW_ACCOUNT_KEY not set — {label} skipped")
         return None
