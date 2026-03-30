@@ -163,6 +163,7 @@ class AuditorNode:
     def __init__(
         self,
         key_path:           str   = "./identity.pem",
+        model:              str   = "./models/auditor_model.joblib",
         bid_price:          float = 1.0,
         deposit:            float = DEPOSIT_AMOUNT,
         flow_api_url:       str   = FLOW_API_URL_DEFAULT,
@@ -193,7 +194,7 @@ class AuditorNode:
         # ── ML model ─────────────────────────────────────────────────────────
         print("[*] Loading Random Forest model (Model B)...")
         try:
-            self.model = joblib.load('./models/auditor_model.joblib')
+            self.model = joblib.load(model)
             print("[*] Model loaded.")
         except FileNotFoundError:
             print("[WARN] ./models/auditor_model.joblib not found — ML verification skipped.")
@@ -790,6 +791,8 @@ def main():
     parser = argparse.ArgumentParser(description="SwarmVerifier Auditor Node")
     parser.add_argument("--key-file",  default="./identity.pem",
                         help="Path to PEM file for auditor identity (created if absent).")
+    parser.add_argument("--model",  default="./models/auditor_model.joblib",
+                        help="Path ML model(Joblib)."),
     parser.add_argument("--bid-price", type=float, default=1.0,
                         help="FLOW tokens to bid per verification job.")
     parser.add_argument("--deposit",   type=float, default=DEPOSIT_AMOUNT,
@@ -812,6 +815,7 @@ def main():
 
     node = AuditorNode(
         key_path           = args.key_file,
+        model              = args.model,
         bid_price          = args.bid_price,
         deposit            = args.deposit,
         flow_api_url       = args.flow_url,
