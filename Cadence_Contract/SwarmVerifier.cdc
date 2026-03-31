@@ -9,9 +9,9 @@
 //   Phase 2   — submitVerdict: requires deposit on record (contract enforces).
 //   Phase 3   — finalizeEvent: three-way disbursement:
 //
-//     ALIGNED  → auditor receives deposit + bid
-//     DEVIATED → auditor receives deposit only; bid returned to transporter
-//     SILENT   → auditor receives nothing; deposit + bid returned to transporter
+//     ALIGNED  → auditor unlocks deposit; earns bid; gains rep.
+//     DEVIATED → auditor unlocks deposit; loses bid; loses rep.
+//     SILENT   → auditor loses deposit; loses bid; loses heavy rep.
 //
 //   Transporter additionally slashed if consensus contradicts their claim.
 //
@@ -20,8 +20,11 @@
 
 access(all) contract SwarmVerifierV4 {
 
-    access(all) let alpha:              Fix64    //  10.0  reputation reward
-    access(all) let beta:               Fix64    //   5.0  deviation penalty
+    // ── Global Configuration ──────────────────────────────────────────────────
+    
+    access(all) let alpha:              Fix64    //  10.0  auditor reputation reward base
+    access(all) let beta:               Fix64    //   5.0  auditor deviation penalty
+    
     access(all) let blacklistThreshold: Fix64    // -50.0  reputation floor
     access(all) let minimumStake:       UFix64   //  10.0  FLOW to register
     access(all) let verdictTimeoutSecs: UFix64   //  60.0  force-finalize window
@@ -48,19 +51,26 @@ access(all) contract SwarmVerifierV4 {
             self.totalAudits = 0; self.correctAudits = 0
         }
 
+        // Zero-Sum Accounting Methods
         access(contract) fun lockEscrow(amount: UFix64) {
             pre { self.stakedFlow >= self.escrowBalance + amount:
                 "Insufficient stake: need ".concat((self.escrowBalance+amount).toString())
                 .concat(" have ").concat(self.stakedFlow.toString()) }
             self.escrowBalance = self.escrowBalance + amount
         }
-        access(contract) fun releaseEscrow(amount: UFix64) {
+        
+        access(contract) fun unlockEscrow(amount: UFix64) {
             self.escrowBalance = amount > self.escrowBalance ? 0.0 : self.escrowBalance - amount
         }
-        access(contract) fun receivePayment(amount: UFix64) { self.stakedFlow = self.stakedFlow + amount }
-        access(contract) fun slashStake(amount: UFix64) {
+        
+        access(contract) fun addStake(amount: UFix64) { 
+            self.stakedFlow = self.stakedFlow + amount 
+        }
+        
+        access(contract) fun removeStake(amount: UFix64) {
             self.stakedFlow = amount >= self.stakedFlow ? 0.0 : self.stakedFlow - amount
         }
+
         access(contract) fun applyReputationDelta(delta: Fix64) {
             self.reputation = self.reputation + delta
             if self.reputation < SwarmVerifierV4.blacklistThreshold {
@@ -68,6 +78,7 @@ access(all) contract SwarmVerifierV4 {
                 emit AgentBlacklisted(nodeId: self.nodeId, reputation: self.reputation, stakedFlow: self.stakedFlow)
             }
         }
+        
         access(contract) fun recordAudit(wasCorrect: Bool) {
             self.totalAudits = self.totalAudits + 1
             if wasCorrect { self.correctAudits = self.correctAudits + 1 }
@@ -102,10 +113,7 @@ access(all) contract SwarmVerifierV4 {
         access(all) let anomalyConfidence: UFix64
         access(all) let registeredAt:      UFix64
         access(all) let quorumIds:         [String]
-        // auditorId → bid price (FLOW). Parallel to quorumIds. Set at registerAnomaly.
         access(all) var bidPrices:         {String: UFix64}
-        // auditorId → deposit amount. Populated in Phase 1.5 as each auditor pays.
-        // submitVerdict pre-condition requires an entry here.
         access(all) var deposits:          {String: UFix64}
         access(all) var verdicts:          {String: PendingVerdict}
         access(all) var finalized:         Bool
@@ -219,7 +227,7 @@ access(all) contract SwarmVerifierV4 {
         pre {
             quorumIds.length > 0:                                    "Empty quorum"
             quorumIds.length == bidPrices.length:                    "Parallel array length mismatch"
-            anomalyConfidence >= 0.0 && anomalyConfidence <= 1.0:   "Confidence out of range"
+            anomalyConfidence >= 0.0 && anomalyConfidence <= 1.0:    "Confidence out of range"
             SwarmVerifierV4.networkAgents[transporterId] != nil:     "Transporter not registered"
             !SwarmVerifierV4.networkAgents[transporterId]!.isBlacklisted: "Transporter blacklisted"
             SwarmVerifierV4.pendingEvents[submissionSig] == nil:     "Duplicate submissionSig"
@@ -335,23 +343,34 @@ access(all) contract SwarmVerifierV4 {
         let pendingEvent = SwarmVerifierV4.pendingEvents[eventId]!
         assert(pendingEvent.isReadyToFinalize(), message: "Not ready to finalize")
 
-        // Cswarm + consensus
+        // 1. Calculate Consensus (using ONLY active nodes to prevent "Silent Veto")
         var confidenceSum: UFix64 = 0.0
         var dropVotes: Int = 0
+        var activeNodes: Int = 0                                       
         let n = pendingEvent.quorumIds.length
+        
         for id in pendingEvent.quorumIds {
             if let v = pendingEvent.verdicts[id] {
                 confidenceSum = confidenceSum + v.confidence
+                activeNodes = activeNodes + 1
                 if v.verdict { dropVotes = dropVotes + 1 }
             }
         }
-        let cswarm: UFix64         = confidenceSum / UFix64(n)
-        let consensusVerdict: Bool = dropVotes > (n / 2)
-        let cswarmF                = Fix64(cswarm)
+        
+        let cswarm: UFix64 = activeNodes > 0 
+            ? (confidenceSum / UFix64(activeNodes)) 
+            : 0.0
+            
+        let consensusVerdict: Bool = activeNodes > 0 
+            ? (dropVotes > (activeNodes / 2)) 
+            : false
+            
+        let cswarmF = Fix64(cswarm)
 
-        // Per-auditor disbursement
-        var auditorResults:      [AuditorResult] = []
-        var transporterRecovery: UFix64 = 0.0
+        // 2. Per-Auditor Zero-Sum Disbursement
+        var auditorResults: [AuditorResult] = []
+        var bidsPaidOut:    UFix64 = 0.0
+        var depositsSeized: UFix64 = 0.0
 
         for id in pendingEvent.quorumIds {
             let submitted  = pendingEvent.verdicts[id]
@@ -364,34 +383,42 @@ access(all) contract SwarmVerifierV4 {
             let verdictSig = submitted?.verdictSignature ?? ""
             let aligned    = !silent && (verdict == consensusVerdict)
 
-            var delta: Fix64 = SwarmVerifierV4.alpha * (cswarmF - Fix64(confidence))
-            if !aligned { delta = delta - SwarmVerifierV4.beta }
-
-            var auditorAgent = SwarmVerifierV4.networkAgents[id]!
-            auditorAgent.applyReputationDelta(delta: delta)
-            auditorAgent.recordAudit(wasCorrect: aligned)
-
-            var totalReceived: UFix64 = 0.0
+            var delta: Fix64 = 0.0
             var outcome: String = ""
+            var totalReceived: UFix64 = 0.0
+            var auditorAgent = SwarmVerifierV4.networkAgents[id]!
+            
+            // Unlock their commitment bond regardless of outcome
+            auditorAgent.unlockEscrow(amount: deposit)
 
             if silent {
-                // Forfeits everything → transporter
+                // Auditor loses deposit; takes heavy reputation hit
+                auditorAgent.removeStake(amount: deposit)
+                depositsSeized = depositsSeized + deposit
+                
+                delta = -10.0
+                auditorAgent.applyReputationDelta(delta: delta)
                 outcome = "silent"
-                auditorAgent.releaseEscrow(amount: deposit)
-                transporterRecovery = transporterRecovery + deposit + bid
+                
             } else if aligned {
-                // Gets deposit back + bid
-                outcome = "aligned"
+                // Auditor keeps deposit; earns the bid; gains rep
+                auditorAgent.addStake(amount: bid)
+                bidsPaidOut = bidsPaidOut + bid
                 totalReceived = deposit + bid
-                auditorAgent.releaseEscrow(amount: deposit)
-                auditorAgent.receivePayment(amount: totalReceived)
+                
+                delta = SwarmVerifierV4.alpha * (cswarmF - Fix64(confidence))
+                auditorAgent.applyReputationDelta(delta: delta)
+                auditorAgent.recordAudit(wasCorrect: true)
+                outcome = "aligned"
+                
             } else {
-                // Gets deposit back; bid → transporter
-                outcome = "deviated"
+                // Auditor keeps deposit; loses the bid; loses rep
                 totalReceived = deposit
-                auditorAgent.releaseEscrow(amount: deposit)
-                auditorAgent.receivePayment(amount: deposit)
-                transporterRecovery = transporterRecovery + bid
+                
+                delta = SwarmVerifierV4.alpha * (cswarmF - Fix64(confidence)) - SwarmVerifierV4.beta
+                auditorAgent.applyReputationDelta(delta: delta)
+                auditorAgent.recordAudit(wasCorrect: false)
+                outcome = "deviated"
             }
 
             SwarmVerifierV4.networkAgents[id] = auditorAgent
@@ -404,20 +431,36 @@ access(all) contract SwarmVerifierV4 {
             ))
         }
 
-        // Transporter escrow release + false-positive slash
+        // 3. Transporter Settlement & Slashing
         let totalBidEscrow = pendingEvent.totalBidEscrow()
         var transporterAgent = SwarmVerifierV4.networkAgents[pendingEvent.transporterId]!
-        transporterAgent.releaseEscrow(amount: totalBidEscrow)
-        if transporterRecovery > 0.0 { transporterAgent.receivePayment(amount: transporterRecovery) }
+        
+        // Unlock their promised bids
+        transporterAgent.unlockEscrow(amount: totalBidEscrow)
+        // Deduct exactly what was earned by ALIGNED auditors
+        transporterAgent.removeStake(amount: bidsPaidOut)
+        // Award them the deposits seized from SILENT auditors
+        transporterAgent.addStake(amount: depositsSeized)
 
         var transporterSlashed = false
-        if (pendingEvent.anomalyConfidence >= 0.85) != consensusVerdict {
-            let paidToAuditors = totalBidEscrow - transporterRecovery
-            if paidToAuditors > 0.0 { transporterAgent.slashStake(amount: paidToAuditors) }
-            transporterSlashed = true
+        
+        // Only evaluate the transporter if at least one auditor actively voted
+        if activeNodes > 0 {
+            if (pendingEvent.anomalyConfidence >= 0.85) != consensusVerdict {
+                // Transporter was wrong: Slash stake and reputation
+                // We slash an amount equal to their total bid escrow as a flat penalty
+                transporterAgent.removeStake(amount: totalBidEscrow)
+                transporterSlashed = true
+                transporterAgent.applyReputationDelta(delta: -10.0)
+            } else {
+                // Transporter was right: Gain reputation
+                transporterAgent.applyReputationDelta(delta: 2.0)
+            }
         }
+        
         SwarmVerifierV4.networkAgents[pendingEvent.transporterId] = transporterAgent
 
+        // 4. Ledger Update
         SwarmVerifierV4.anomalyLedger[eventId] = AnomalyEvent(
             eventId: eventId, transporterId: pendingEvent.transporterId,
             submissionSig: pendingEvent.submissionSig,
@@ -495,11 +538,15 @@ access(all) contract SwarmVerifierV4 {
     // ── Init ──────────────────────────────────────────────────────────────────
 
     init() {
-        self.alpha = 10.0; self.beta = 5.0; self.blacklistThreshold = -50.0
-        self.minimumStake = 10.0; self.verdictTimeoutSecs = 60.0; self.depositPerAuditor = 0.5
+        self.alpha = 10.0
+        self.beta = 5.0
+        self.blacklistThreshold = -50.0
+        self.minimumStake = 10.0
+        self.verdictTimeoutSecs = 60.0
+        self.depositPerAuditor = 0.5
+        
         self.networkAgents = {}; self.pendingEvents = {}; self.anomalyLedger = {}
     }
-
 
     // ── Emergency Admin Purge ─────────────────────────────────────────────────
 
@@ -509,18 +556,18 @@ access(all) contract SwarmVerifierV4 {
         for id in eventIds {
             if let ev = self.pendingEvents[id] {
                 
-                // 1. Unlock the Transporter's Escrow (the sum of the bid prices)
+                // 1. Unlock the Transporter's Escrow
                 let totalBidEscrow = ev.totalBidEscrow()
                 if let transporterAgent = self.networkAgents[ev.transporterId] {
-                    transporterAgent.releaseEscrow(amount: totalBidEscrow)
+                    transporterAgent.unlockEscrow(amount: totalBidEscrow)
                     self.networkAgents[ev.transporterId] = transporterAgent
                 }
 
-                // 2. Unlock the Auditors' Escrows (the 0.5 FLOW deposits)
+                // 2. Unlock the Auditors' Escrows
                 for auditorId in ev.deposits.keys {
                     let depositAmt = ev.deposits[auditorId]!
                     if let auditorAgent = self.networkAgents[auditorId] {
-                        auditorAgent.releaseEscrow(amount: depositAmt)
+                        auditorAgent.unlockEscrow(amount: depositAmt)
                         self.networkAgents[auditorId] = auditorAgent
                     }
                 }
@@ -532,12 +579,11 @@ access(all) contract SwarmVerifierV4 {
     }
 
     access(all) fun hackathonResetState() {
-    // Only the account that owns this contract can run this
-    if self.account.address != 0xfcd23c8d1553708a {
-        panic("Not authorized")
+        if self.account.address != 0xfcd23c8d1553708a {
+            panic("Not authorized")
+        }
+        self.networkAgents = {}
+        self.anomalyLedger = {}
+        self.pendingEvents = {}
     }
-    self.networkAgents = {}
-    self.anomalyLedger = {}
-    self.pendingEvents = {}
-}
 }

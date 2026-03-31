@@ -3,6 +3,7 @@ import socket
 import threading
 from typing import Optional
 import joblib
+import numpy as np
 from ecdsa import NIST256p, SigningKey
 
 class LazyDropModel:

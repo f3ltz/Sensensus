@@ -1,0 +1,17 @@
+# ── Environment & Config ──
+python-dotenv
+
+# ── Cryptography ──
+ecdsa
+
+# ── Flow Blockchain ──
+flow-py-sdk
+
+# ── Networking ──
+requests
+
+# ── Data & Machine Learning ──
+numpy
+pandas
+joblib
+scikit-learn
