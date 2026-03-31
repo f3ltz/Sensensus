@@ -20,7 +20,7 @@ When a physical node detects an anomaly (such as a severe physical drop or impac
 ### Key Features
 * **Zero-Trust Hardware:** Raw sensor data is locally inferred using a 1D Convolutional Neural Network before ever touching the internet.
 * **Cryptographic Sybil Resistance:** Every node signs its data beacons using ECDSA (secp256r1) elliptic curves to prevent node spoofing and man-in-the-middle attacks.
-* **HTTP 402 Data Tolls:** A unique implementation of the `402 Payment Required` protocol to prevent network spam and monetize hardware data buffering.
+* **HTTP x402 Data Tolls:** A unique implementation of the `402 Payment Required` protocol to prevent network spam and monetize hardware data buffering.
 * **Immutable Settlement:** Flow blockchain smart contracts handle all consensus logic, economic slashing, and ledger settlements autonomously.
 
 ---

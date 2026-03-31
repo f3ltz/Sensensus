@@ -48,12 +48,14 @@ static void _commit_sample() {
     g_lastSample = s;
     _have_accel = _have_quat = false;
     
-    #ifdef PRINT_IMU
-    Serial.printf("%lu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
-    (unsigned long)ts,
-    s.ax, s.ay, s.az,
-    s.qw, s.qx, s.qy, s.qz);
-    #endif
+    // static uint8_t _ui_tick = 0;
+    // if (++_ui_tick >= 2) { // 25 Hz 
+    //     _ui_tick = 0;
+    //     Serial.printf("$IMU,%lu,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f          \r",
+    //         (unsigned long)ts,
+    //         s.ax, s.ay, s.az,
+    //         s.qw, s.qx, s.qy, s.qz);
+    // }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

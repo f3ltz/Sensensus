@@ -5,7 +5,6 @@ import pandas as pd
 
 from scripts.constants import CSV_COLUMNS, FEATURE_COLS, WINDOW_SIZE, INPUT_TENSOR_SIZE
 from scripts.crypto import verdict_canonical, sign_data
-from scripts.flow import submit_to_flow
 from scripts.state import state
 
 class LazyDropModel:
@@ -76,6 +75,7 @@ def submit_verdict(verdict_bool: bool, confidence: float, payload_signature: str
     }
 
     if state.flow_enabled:
+        from scripts.flow import submit_to_flow
         submit_to_flow(body)
     else:
         submit_to_mock(body)

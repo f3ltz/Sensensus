@@ -64,17 +64,20 @@ export default function SerialImuPanel({ onImuUpdate }) {
         const { value, done } = await reader.read();
         if (done) break;
         bufRef.current += value;
-        const lines = bufRef.current.split("\n");
+        const lines = bufRef.current.split(/[\r\n]+/);
         bufRef.current = lines.pop();
         for (const line of lines) {
           const t = line.trim();
           if (!t || t.startsWith("timestamp_ms")) continue;
-          const p = parseCsvLine(t);
-          if (p) {
-            setImu(p);
-            onImuUpdate?.(p);
+          if (t.startsWith("$IMU,")) {
+            // Strip the "$IMU," prefix and parse the standard CSV
+            const p = parseCsvLine(t.substring(5));
+            if (p) {
+              setImu(p);
+              onImuUpdate?.(p);
+            }
           } else {
-            addLog(t.slice(0, 60), "err");
+            addLog(t.slice(0, 80), "dim");
           }
         }
       }
