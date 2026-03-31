@@ -7,14 +7,6 @@ from scripts.constants import CSV_COLUMNS, FEATURE_COLS, WINDOW_SIZE, INPUT_TENS
 from scripts.crypto import verdict_canonical, sign_data
 from scripts.state import state
 
-class LazyDropModel:
-    def predict(self, X):
-        return np.ones(len(X), dtype=int)
-
-    def predict_proba(self, X):
-        p1 = np.random.uniform(0.60, 0.70, size=len(X))
-        p0 = 1.0 - p1
-        return np.vstack((p0, p1)).T
 
 def run_verification(csv_raw: str, payload_signature: str):
     if state.model is None:

@@ -10,6 +10,7 @@ from scripts.constants import DEPOSIT_AMOUNT, FLOW_API_URL_DEFAULT, FLOW_CONTRAC
 from scripts.flow import register_on_flow
 from scripts.state import state
 from scripts.udp import broadcast_presence, listen
+from scripts.state import LazyDropModel
 
 def main():
     parser = argparse.ArgumentParser(description="SwarmVerifier Auditor Node")
