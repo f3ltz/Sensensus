@@ -5,6 +5,15 @@ from typing import Optional
 import joblib
 from ecdsa import NIST256p, SigningKey
 
+class LazyDropModel:
+    def predict(self, X):
+        return np.ones(len(X), dtype=int)
+
+    def predict_proba(self, X):
+        p1 = np.random.uniform(0.60, 0.70, size=len(X))
+        p0 = 1.0 - p1
+        return np.vstack((p0, p1)).T
+
 class AuditorState:
     def __init__(self):
         # ── Cryptographic identity ────────────────────────────────────────────

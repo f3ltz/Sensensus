@@ -5,17 +5,9 @@ import pandas as pd
 
 from scripts.constants import CSV_COLUMNS, FEATURE_COLS, WINDOW_SIZE, INPUT_TENSOR_SIZE
 from scripts.crypto import verdict_canonical, sign_data
-from scripts.flow import submit_to_flow
+
 from scripts.state import state
 
-class LazyDropModel:
-    def predict(self, X):
-        return np.ones(len(X), dtype=int)
-
-    def predict_proba(self, X):
-        p1 = np.random.uniform(0.60, 0.70, size=len(X))
-        p0 = 1.0 - p1
-        return np.vstack((p0, p1)).T
 
 def run_verification(csv_raw: str, payload_signature: str):
     if state.model is None:
@@ -76,6 +68,7 @@ def submit_verdict(verdict_bool: bool, confidence: float, payload_signature: str
     }
 
     if state.flow_enabled:
+        from scripts.flow import submit_to_flow
         submit_to_flow(body)
     else:
         submit_to_mock(body)
