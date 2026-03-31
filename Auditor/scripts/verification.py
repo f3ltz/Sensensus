@@ -1,4 +1,5 @@
 import io
+import time
 import requests
 import numpy as np
 import pandas as pd
@@ -38,6 +39,9 @@ def run_verification(csv_raw: str, payload_signature: str):
         probabilities = state.model.predict_proba(X)[0]
         confidence    = float(max(probabilities))
         verdict_bool  = bool(prediction == 1)
+
+        print("[ML] Waiting 10s for Transporter's deposit TX to seal on-chain...")
+        time.sleep(10)
 
         print(f"[ML] Verdict: {'DROP' if verdict_bool else 'NORMAL'} | confidence={confidence:.4f}")
         submit_verdict(verdict_bool, confidence, payload_signature)

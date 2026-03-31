@@ -99,50 +99,24 @@ Sensensus is designed to withstand several attack vectors common to IoT networks
 
 ---
 
-## Getting Started
-
+## Getting Started  
+To run the full end-to-end system, you will need to deploy the smart contract, flash the edge hardware, spin up the local auditor swarm, and launch the dashboard.
 ### Prerequisites
 * PlatformIO installed via VSCode.
 * Flow CLI installed on your host machine.
 * Node.js v18+ and npm.
 * Python 3.9+ with `scikit-learn` and `requests` installed.
 
-### 1. Flash the Hardware
-Navigate to the `PICOPART` directory. Open your configuration file to define your local Wi-Fi credentials and flash the firmware to your Pico 2W.
-```bash
-cd PICOPART
-pio run --target upload
-```
-### 2. Deploy Flow Smart Contract
-
-Deploy the staking and consensus logic to the Flow testnet. Ensure your `flow.json` is configured with a valid testnet account.
-
-```bash
-flow project deploy --network testnet
-```
-
-### 3. Spin up the Dashboard
-
-Start the React frontend to visualize network consensus, reputation, and slashing events in real-time.
-
-
-
-```bash
-cd dashboard
-npm install
-npm run dev
-```
-
-### 4. Run the Python Auditors & Trigger an Event
-
-Start your auditor nodes in separate terminal windows to simulate the decentralized swarm.
-
-
-
-```bash
-cd auditors
-python auditor_node.py --id Auditor-A
-python auditor_node.py --id Auditor-B
-```
+#### Step 1: Flash the Hardware (The Transporter)
+1. Wiring the BNO085 to the Pico 2W:
+- `VIN` ➔ `3.3V (OUT)`
+- `GND` ➔ `GND`
+- `SDA` ➔ `GPIO 4`
+- `SCL` ➔ `GPIO 5`
+2. Open the `Transporter_Pico` directory in PlatformIO
+3. Navigate to `platformio.ini` and update the following definitions
+- `WIFI_SSID` and `WIFI_PASS` (must be on the same network as your laptop)
+- `PICO_PRIV_KEY_HEX` (generate a random 64-character hex string for the Pico's identity)
+4. Navigate to `src/config.h` and tweak the values as required.
 
 Once the network is live, physically drop the hardware. Watch the React Dashboard visualize the network consensus, intercept the UDP packets, process the x402 payment, and trigger the Flow slashing event in real-time.

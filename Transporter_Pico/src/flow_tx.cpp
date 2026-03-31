@@ -674,7 +674,7 @@ bool flow_tx_submit_deposit(const char *event_id, const char *auditor_pub_hex,
     
     _tx_params p = { script, args, 2, 9999 };
     char tx_id[65];
-    bool ok = _submit_tx(&p, true, tx_id);
+    bool ok = _submit_tx(&p, false, tx_id);
     if (ok) Serial.printf("[FlowTx] recordDeposit sealed: %.16s...\n", tx_id);
     return ok;
 }
