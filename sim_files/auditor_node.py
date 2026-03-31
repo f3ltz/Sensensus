@@ -51,6 +51,7 @@ from dotenv import load_dotenv
 from typing import Optional
 
 import joblib
+from sklearn.base import BaseEstimator
 import numpy as np
 import pandas as pd
 import requests
@@ -152,6 +153,17 @@ class _EcdsaSigner(FlowSigner):
             hashfunc=hashlib.sha3_256,
             sigencode=sigencode_string,
         )
+    
+class LazyDropModel:
+    def predict(self, X):
+        # Always output 1 (DROP)
+        return np.ones(len(X), dtype=int)
+
+    def predict_proba(self, X):
+        # Generate random confidence for Class 1 (DROP) between 60% and 70%
+        p1 = np.random.uniform(0.60, 0.70, size=len(X))
+        p0 = 1.0 - p1
+        return np.vstack((p0, p1)).T
 
 
 # ─────────────────────────────────────────────────────────────────────────────
