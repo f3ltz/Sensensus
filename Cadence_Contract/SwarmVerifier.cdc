@@ -318,6 +318,10 @@ access(all) contract SwarmVerifierV4 {
 
         emit VerdictSubmitted(eventId: eventId, auditorId: auditorId, verdict: verdict,
             verdictN: ev.verdicts.length, quorumN: ev.quorumIds.length)
+
+        if ev.isReadyToFinalize(){
+            self.finalizeEvent(eventId: eventId)
+        }
     }
 
     // ── Phase 3: finalizeEvent ────────────────────────────────────────────────
@@ -495,4 +499,45 @@ access(all) contract SwarmVerifierV4 {
         self.minimumStake = 10.0; self.verdictTimeoutSecs = 60.0; self.depositPerAuditor = 0.5
         self.networkAgents = {}; self.pendingEvents = {}; self.anomalyLedger = {}
     }
+
+
+    // ── Emergency Admin Purge ─────────────────────────────────────────────────
+
+    // Forcefully removes stuck events and manually unlocks trapped escrows
+    // without executing the consensus/slashing logic.
+    access(all) fun forcePurgeStuckEvents(eventIds: [String]) {
+        for id in eventIds {
+            if let ev = self.pendingEvents[id] {
+                
+                // 1. Unlock the Transporter's Escrow (the sum of the bid prices)
+                let totalBidEscrow = ev.totalBidEscrow()
+                if let transporterAgent = self.networkAgents[ev.transporterId] {
+                    transporterAgent.releaseEscrow(amount: totalBidEscrow)
+                    self.networkAgents[ev.transporterId] = transporterAgent
+                }
+
+                // 2. Unlock the Auditors' Escrows (the 0.5 FLOW deposits)
+                for auditorId in ev.deposits.keys {
+                    let depositAmt = ev.deposits[auditorId]!
+                    if let auditorAgent = self.networkAgents[auditorId] {
+                        auditorAgent.releaseEscrow(amount: depositAmt)
+                        self.networkAgents[auditorId] = auditorAgent
+                    }
+                }
+
+                // 3. Delete the event from state
+                self.pendingEvents.remove(key: id)
+            }
+        }
+    }
+
+    access(all) fun hackathonResetState() {
+    // Only the account that owns this contract can run this
+    if self.account.address != 0xfcd23c8d1553708a {
+        panic("Not authorized")
+    }
+    self.networkAgents = {}
+    self.anomalyLedger = {}
+    self.pendingEvents = {}
+}
 }
