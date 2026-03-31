@@ -29,7 +29,7 @@ When a physical node detects an anomaly (such as a severe physical drop or impac
 
 Every detected anomaly undergoes a rigorous 4-stage "Race to Quorum" before being written to the immutable ledger. 
 
-![Event Consensus Lifecycle](./assets/diagram_1_lifecycle.png)
+![Event Consensus Lifecycle](./Images/diagram_1_lifecycle.png)
 > *Figure 1: The 4-phase lifecycle of an anomaly on the Flow blockchain.*
 
 Our network is divided into two distinct roles: **The Transporter** (the physical asset being tracked) and **The Auditor Swarm** (the decentralized verification network).
@@ -42,7 +42,7 @@ Our network is divided into two distinct roles: **The Transporter** (the physica
 ### 2. Cryptographic Beacons & Network Topology
 Once in an anomaly state, the Transporter must alert the network without relying on a centralized broker. It generates an ECDSA signature of the event timestamp and broadcasts a UDP multicast beacon to the local network. 
 
-![Network Topology](./assets/diagram_2_topology.png)
+![Network Topology](./Images/diagram_2_topology.png)
 > *Figure 2: Data flows from the Hardware Edge, through the Auditor Swarm, and settles On-Chain.*
 
 - Python-based **Auditor nodes** intercept this beacon and verify the public key signature to ensure the Transporter is a registered, staked network participant.
@@ -56,7 +56,7 @@ Once in an anomaly state, the Transporter must alert the network without relying
 ### 4. Smart Contract Settlement & Game Theory
 Auditors submit their final ML verdict (Drop vs. Normal) to the Flow blockchain via a signed transaction. The `SwarmVerifierV4.cdc` Cadence smart contract waits for the quorum to finish, then executes the Incentive Matrix:
 
-![Incentive Matrix](./assets/diagram_3_gametheory.png)
+![Incentive Matrix](./Images/diagram_3_gametheory.png)
 > *Figure 3: The Game Theory and economic incentive matrix governed by SwarmVerifier.cdc.*
 
 - **Aligned Auditors:** If an auditor's verdict matches the Swarm Consensus (`cswarm`), they are rewarded with their deposit back, plus the bid price payout, and a reputation boost.
