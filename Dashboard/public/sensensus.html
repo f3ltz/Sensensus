@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SENSENSUS · Protocol Topology</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:     #060810;
+    --bg2:    #090d1a;
+    --bg3:    #0d1428;
+    --b1:     #1a2540;
+    --b2:     #243050;
+    --layer:  rgba(13, 20, 40, 0.4);
+    
+    --t1:     #d8eaff;
+    --t2:     #8aaece;
+    --t3:     #4a6a90;
+    --t4:     #2a3e58;
+    
+    --amber:  #f5a623;
+    --amberD: #7a4e0a;
+    --amberG: rgba(245, 166, 35, 0.15);
+    
+    --green:  #2edb6e;
+    --greenD: #0f5028;
+    --greenG: rgba(46, 219, 110, 0.15);
+    
+    --red:    #f03a5c;
+    --redD:   #601020;
+    
+    --blue:   #4ab8f0;
+    --blueD:  #143050;
+    --blueG:  rgba(74, 184, 240, 0.15);
+    
+    --purple: #b08dff;
+    --purpleD:#4a2a7a;
+    
+    --mono:   'JetBrains Mono', monospace;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  
+  body {
+    background: var(--bg);
+    color: var(--t1);
+    font-family: var(--mono);
+    padding: 20px;
+    line-height: 1.4;
+    background-image: radial-gradient(circle at 50% 0%, #111a30 0%, transparent 50%);
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    justify-content: center;
+    align-items: center;
+  }
+
+  /* ─── HEADER ─── */
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 24px;
+    border-bottom: 1px solid var(--b1);
+    padding-bottom: 12px;
+    max-width: 1240px;
+    width: 100%;
+  }
+
+  .pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--amber); box-shadow: 0 0 10px var(--amber);
+    animation: pulse 2s infinite cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); box-shadow: 0 0 4px var(--amber); } }
+
+  .logo { font-size: 18px; font-weight: 700; letter-spacing: 0.15em; }
+  .logo em { font-style: normal; color: transparent; background: linear-gradient(90deg, var(--amber), var(--green)); -webkit-background-clip: text; }
+  .subtitle { font-size: 10px; color: var(--t3); letter-spacing: 0.1em; text-transform: uppercase; margin-left: auto; background: var(--bg2); padding: 4px 10px; border-radius: 20px; border: 1px solid var(--b1); }
+
+  /* ─── LAYOUT BOARD ─── */
+  .architecture-board {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 1280px;
+    width: 100%;
+  }
+
+  .top-section {
+    display: flex;
+    justify-content: center;
+    align-items: stretch;
+    gap: 12px;
+    width: 100%;
+  }
+
+  /* ─── LAYER STYLING ─── */
+  .layer {
+    border: 1px dashed var(--b2);
+    border-radius: 10px;
+    background: var(--layer);
+    padding: 30px 16px 16px 16px; /* standard padding for perfect alignment */
+    position: relative;
+    transition: all 0.4s ease;
+    display: flex;
+    flex-direction: column;
+  }
+  .layer:hover { background: rgba(13, 20, 40, 0.6); }
+  
+  .layer-title {
+    position: absolute; top: -10px; left: 16px; background: var(--bg); padding: 2px 10px;
+    font-size: 9.5px; font-weight: 700; color: var(--t2); letter-spacing: 0.1em;
+    border-radius: 4px; border: 1px solid var(--b1); box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    transition: all 0.3s ease;
+    z-index: 10;
+  }
+
+  .layer.edge { flex: 1; border-color: var(--amberD); max-width: 540px; }
+  .layer.edge:hover { border-color: var(--amber); box-shadow: inset 0 0 30px var(--amberG); }
+  .layer.edge:hover .layer-title { color: var(--amber); border-color: var(--amberD); }
+
+  .layer.swarm { flex: 1.2; border-color: var(--blueD); max-width: 640px; }
+  .layer.swarm:hover { border-color: var(--blue); box-shadow: inset 0 0 30px var(--blueG); }
+  .layer.swarm:hover .layer-title { color: var(--blue); border-color: var(--blueD); }
+
+  .layer.settlement { width: 100%; border-color: var(--greenD); flex-direction: row; align-items: center; justify-content: center; flex-wrap: wrap; padding: 28px 16px 16px 16px; gap: 15px; }
+  .layer.settlement:hover { border-color: var(--green); box-shadow: inset 0 0 30px var(--greenG); }
+  .layer.settlement:hover .layer-title { color: var(--green); border-color: var(--greenD); }
+
+  /* ─── GRID / ALIGNMENT UTILS ─── */
+  .layer-row {
+    display: flex;
+    align-items: center;
+    height: 120px; /* Locked height guarantees perfect rows across columns */
+    width: 100%;
+    gap: 15px;
+  }
+  .v-space {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 40px; /* Locked vertical spacer */
+    width: 100%;
+    position: relative;
+    z-index: 10;
+  }
+  .col { display: flex; flex-direction: column; gap: 8px; }
+
+  /* ─── NODE STYLES ─── */
+  .node {
+    background: var(--bg2); border: 1px solid var(--b1); border-radius: 6px;
+    box-shadow: 0 6px 16px rgba(0,0,0,0.4); min-width: 210px; position: relative; z-index: 2;
+    transition: transform 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.4s ease, border-color 0.3s ease;
+  }
+  .node:hover { transform: translateY(-4px); z-index: 50; }
+  
+  .node.mini { min-width: 160px; }
+  .node.large { min-width: 250px; }
+  
+  .node.transparent { background: rgba(9, 13, 26, 0.5); border: 1px dashed var(--t3); box-shadow: none; backdrop-filter: blur(4px); }
+  .node.transparent:hover { background: rgba(9, 13, 26, 0.9); border-style: solid; box-shadow: 0 8px 20px rgba(0,0,0,0.5); }
+
+  /* ─── NODE INTERNALS ─── */
+  .node-header { padding: 8px 12px; border-bottom: 1px solid var(--b1); display: flex; justify-content: space-between; align-items: center; background: rgba(0,0,0,0.3); border-radius: 6px 6px 0 0; }
+  .title-wrapper { display: flex; align-items: center; gap: 8px; }
+  .node-type { font-size: 9px; font-weight: 700; letter-spacing: 0.1em; }
+  .node-id { font-size: 8px; color: var(--t3); background: rgba(255,255,255,0.05); padding: 2px 5px; border-radius: 4px; }
+
+  .node-icon { display: flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 4px; }
+  .node-icon svg { width: 10px; height: 10px; }
+  .icon-hw { background: rgba(0, 166, 156, 0.15); border: 1px solid rgba(0, 166, 156, 0.3); stroke: #00A69C; }
+  .icon-py { background: rgba(255, 212, 59, 0.15); border: 1px solid rgba(255, 212, 59, 0.3); stroke: #FFD43B; }
+  .icon-api { background: rgba(138, 174, 206, 0.15); border: 1px solid rgba(138, 174, 206, 0.3); stroke: var(--t2); }
+  .icon-quorum { background: rgba(74, 184, 240, 0.15); border: 1px solid rgba(74, 184, 240, 0.3); stroke: var(--blue); }
+  .icon-ml { background: rgba(255, 111, 0, 0.15); border: 1px solid rgba(255, 111, 0, 0.3); stroke: #FF6F00; }
+  .icon-flow { background: rgba(0, 239, 139, 0.15); border: 1px solid rgba(0, 239, 139, 0.3); stroke: #00EF8B; }
+  .icon-math { background: rgba(216, 234, 255, 0.15); border: 1px solid rgba(216, 234, 255, 0.3); stroke: var(--t1); }
+
+  .node-body { padding: 10px 12px; }
+  .data-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; font-size: 9px; }
+  .data-row:last-child { margin-bottom: 0; }
+  .data-label { color: var(--t3); font-family: monospace; }
+  .data-val { color: var(--t1); font-weight: 500; }
+  .code-text { color: var(--purple); font-size: 8.5px; background: rgba(176, 141, 255, 0.08); border: 1px solid rgba(176, 141, 255, 0.2); padding: 2px 4px; border-radius: 4px; }
+  .node:hover .code-text { background: rgba(176, 141, 255, 0.15); }
+  
+  .node-footer { padding: 6px 12px; background: rgba(0,0,0,0.2); border-top: 1px dashed var(--b2); font-size: 8px; color: var(--t2); text-align: center; border-radius: 0 0 6px 6px; letter-spacing: 0.05em; }
+
+  /* Node Themes */
+  .edge-node { border-color: var(--amberD); } .edge-node:hover { border-color: var(--amber); box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 15px var(--amberG); } .edge-node .node-type { color: var(--amber); }
+  .swarm-node { border-color: var(--blueD); } .swarm-node:hover { border-color: var(--blue); box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 15px var(--blueG); } .swarm-node .node-type { color: var(--blue); }
+  .auditor-node { border-color: var(--b2); } .auditor-node:hover { border-color: var(--t2); box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 15px rgba(138, 174, 206, 0.1); }
+  .contract-node { border-color: var(--greenD); } .contract-node:hover { border-color: var(--green); box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 15px var(--greenG); } .contract-node .node-type { color: var(--green); }
+
+  /* ─── ARROWS & CONNECTORS ─── */
+  .arrow-right, .arrow-left { flex-shrink: 0; height: 2px; position: relative; z-index: 10; }
+  
+  .arrow-right { background: linear-gradient(90deg, var(--b2) 0%, var(--t3) 50%, var(--b2) 100%); background-size: 200% 100%; animation: flowRight 2s linear infinite; }
+  @keyframes flowRight { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+  
+  .arrow-right.amber { background: linear-gradient(90deg, var(--amberD) 0%, var(--amber) 50%, var(--amberD) 100%); background-size: 200% 100%; }
+  .arrow-right.amber::after { border-left-color: var(--amber); }
+
+  .arrow-left { background: linear-gradient(-90deg, var(--b2) 0%, var(--t3) 50%, var(--b2) 100%); background-size: 200% 100%; animation: flowLeft 2s linear infinite; }
+  @keyframes flowLeft { 0% { background-position: -100% 0; } 100% { background-position: 100% 0; } }
+  .arrow-left::after { content: ''; position: absolute; left: 0; top: -3px; border-top: 4px solid transparent; border-bottom: 4px solid transparent; border-right: 5px solid var(--t3); z-index: 11; }
+  
+  .arrow-left.blue { background: linear-gradient(-90deg, var(--blueD) 0%, var(--blue) 50%, var(--blueD) 100%); background-size: 200% 100%; }
+  .arrow-left.blue::after { border-right-color: var(--blue); }
+
+  .arrow-label { position: absolute; top: -16px; left: 50%; transform: translateX(-50%); font-size: 8px; color: var(--t3); white-space: nowrap; font-family: monospace; background: var(--bg); padding: 2px 6px; border-radius: 10px; border: 1px solid var(--b1); z-index: 5; }
+  
+  .node:hover + .arrow-right .arrow-label, .arrow-right:hover .arrow-label, .arrow-left:hover .arrow-label { color: var(--t1); border-color: var(--t3); box-shadow: 0 0 6px rgba(138, 174, 206, 0.2); }
+  .arrow-right.amber .arrow-label { color: var(--amber); border-color: var(--amberD); }
+  .arrow-left.blue .arrow-label { color: var(--blue); border-color: var(--blueD); }
+
+  .arrow-down-container { display: flex; justify-content: center; height: 100%; position: relative; z-index: 10; }
+  .arrow-down { width: 2px; height: 100%; background: linear-gradient(180deg, var(--b2) 0%, var(--t3) 50%, var(--b2) 100%); background-size: 100% 200%; animation: flowDown 2s linear infinite; position: relative; }
+  @keyframes flowDown { 0% { background-position: 0 100%; } 100% { background-position: 0 -100%; } }
+  .arrow-down::after { content: ''; position: absolute; bottom: 0; left: -3px; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid var(--t3); z-index: 11; }
+  .arrow-down .arrow-label { top: 50%; left: 10px; transform: translateY(-50%); }
+
+  /* Bridge container - perfectly locked padding to layer */
+  .bridge { display: flex; flex-direction: column; width: 110px; padding: 30px 0 16px 0; }
+
+  /* Tags & Outcomes */
+  .tag { padding: 2px 6px; border-radius: 4px; font-size: 7.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+  .tag.amber { background: rgba(245, 166, 35, 0.15); color: var(--amber); border: 1px solid rgba(245, 166, 35, 0.3); }
+  .tag.blue { background: rgba(74, 184, 240, 0.15); color: var(--blue); border: 1px solid rgba(74, 184, 240, 0.3); }
+  .tag.green { background: rgba(46, 219, 110, 0.15); color: var(--green); border: 1px solid rgba(46, 219, 110, 0.3); }
+
+  .outcome-list { font-size: 8.5px; color: var(--t2); padding-left: 12px; margin-top: 4px; font-family: monospace; line-height: 1.5; }
+  .outcome-list li { margin-bottom: 2px; }
+  .outcome-list li:hover { color: var(--t1); }
+
+  /* ─── TOOLTIP STYLES ─── */
+  [data-tooltip] { cursor: help; position: relative; }
+  [data-tooltip]:hover { z-index: 100; }
+  [data-tooltip]::before {
+    content: attr(data-tooltip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%) translateY(8px);
+    background: var(--bg3); color: var(--t1); padding: 8px 12px; border-radius: 6px; font-size: 9.5px; font-weight: 400; font-family: var(--mono);
+    border: 1px solid var(--b2); box-shadow: 0 10px 25px rgba(0,0,0,0.8); white-space: normal; width: max-content; max-width: 240px;
+    text-align: center; line-height: 1.4; opacity: 0; visibility: hidden; z-index: 1000; transition: all 0.2s ease-out; pointer-events: none;
+  }
+  [data-tooltip]::after {
+    content: ''; position: absolute; bottom: calc(100%); left: 50%; transform: translateX(-50%) translateY(8px);
+    border-width: 4px 4px 0; border-style: solid; border-color: var(--b2) transparent transparent transparent;
+    opacity: 0; visibility: hidden; z-index: 1000; transition: all 0.2s ease-out; pointer-events: none;
+  }
+  [data-tooltip]:hover::before, [data-tooltip]:hover::after { opacity: 1; visibility: visible; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+  <div class="header">
+  <button onclick="window.location.href='index.html'" 
+          style="margin-right:10px;">
+    Dashboard
+  </button>
+    <div class="pulse"></div>
+    <div class="logo">SEN<em>SENSUS</em></div>
+    <div class="subtitle">Code-Accurate Protocol State & Topology</div>
+  </div>
+
+  <div class="architecture-board">
+
+    <div class="top-section">
+      
+      <div class="layer edge">
+        <div class="layer-title">TRANSPORTER</div>
+        
+        <div class="layer-row">
+          <div class="node mini edge-node" data-tooltip="Collects raw sensor data natively and batches 75 readings per cycle.">
+            <div class="node-header"><div class="title-wrapper"><div class="node-icon icon-hw"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect></svg></div><span class="node-type">IMU BATCH</span></div></div>
+            <div class="node-body">
+              <div class="data-row"><span class="data-label">Samples</span><span class="data-val">75 rows</span></div>
+              <div class="data-row"><span class="data-label">Delta</span><span class="data-val">20ms (50Hz)</span></div>
+            </div>
+          </div>
+
+          <div class="arrow-right" style="width: 20px;" data-tooltip="When the transporter detects an anomaly, it changes its state."><span class="arrow-label">trigger</span></div>
+
+          <div class="node edge-node large" data-tooltip="Flags a potential physical anomaly and broadcasts to the network to gather bids.">
+            <div class="node-header"><div class="title-wrapper"><div class="node-icon icon-py"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><polyline points="4 17 10 11 4 5"></polyline></svg></div><span class="node-type">TRANSPORTER STATE</span></div><span class="node-id">state.py</span></div>
+            <div class="node-body">
+               <div class="data-row"><span class="data-label">confidence</span><span class="data-val" style="color: var(--amber); font-weight: 700;">~0.9300</span></div>
+               <div class="data-row"><span class="data-label">status</span><span class="tag amber">ANOMALY</span></div>
+               <div class="data-row"><span class="data-label">action</span><span class="data-val">Broadcast PKT_ANOMALY</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="v-space"></div>
+
+        <div class="layer-row" style="justify-content: flex-end;">
+          <div class="node edge-node large" data-tooltip="Filters eligible auditors based on reputation/stake. Selected auditors proceed to lock a deposit.">
+            <div class="node-header"><div class="title-wrapper"><div class="node-icon icon-quorum" style="background: rgba(245,166,35,0.15); border-color: rgba(245,166,35,0.3); stroke: var(--amber);"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="9" cy="7" r="4"></circle></svg></div><span class="node-type">QUORUM SELECTOR</span></div><span class="node-id">SIZE=3</span></div>
+            <div class="node-body">
+              <div class="data-row"><span class="data-label">Score Form</span><span class="code-text">W_P*(1/p) + W_R*rep</span></div>
+              <div class="data-row"><span class="data-label">Selection</span><span class="data-val">Top 3 Nodes Chosen</span></div>
+              <div class="data-row"><span class="data-label">Deposit</span><span class="tag blue">LOCK 0.5 FLOW</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="v-space">
+          <div class="arrow-down-container" style="position: absolute; right: 110px;" data-tooltip="Initializes local HTTP endpoint for the selected Quorum to pull dataset.">
+             <div class="arrow-down"><span class="arrow-label">init()</span></div>
+          </div>
+        </div>
+
+        <div class="layer-row" style="justify-content: flex-end;">
+          <div class="node transparent large" data-tooltip="Enforces economic security: Validates the 0.5 FLOW deposit proof from the auditor before serving the raw CSV dataset.">
+            <div class="node-header" style="background: transparent; border-bottom: none;"><div class="title-wrapper"><div class="node-icon icon-api"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg></div><span class="node-type" style="color: var(--t2);">X402 DATA SERVER</span></div></div>
+            <div class="node-body" style="padding-top: 0;">
+              <div class="data-row"><span class="data-label">GET /data</span><span class="code-text">402 Payment Required</span></div>
+              <div class="data-row"><span class="data-label">POST /pay</span><span class="data-val">Verifies 0.5F tx_hash</span></div>
+              <div class="data-row"><span class="data-label">Response</span><span class="tag green">200 OK + dataset.csv</span></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+
+      <div class="bridge">
+         <div class="layer-row" style="justify-content: center;">
+            <div class="arrow-right amber" style="width: 100%;" data-tooltip="Transporter broadcasts PKT_ANOMALY to local swarm via UDP"><span class="arrow-label">UDP Alert</span></div>
+         </div>
+
+         <div class="v-space"></div>
+
+         <div class="layer-row" style="flex-direction: column; justify-content: center; gap: 24px;">
+            <div class="arrow-left blue" style="width: 100%;" data-tooltip="Auditors respond with PKT_BID (1.0 FLOW) to participate"><span class="arrow-label">Submit Bids</span></div>
+			<div class="arrow-right amber" style="width: 100%;" data-tooltip="Transporter sends a signal to the selected Quorum members"><span class="arrow-label">Quorum Notification</span></div>
+		 </div>
+
+         <div class="v-space"></div>
+
+         <div class="layer-row" style="flex-direction: column; justify-content: center; gap: 24px;">
+            <div class="arrow-left blue" style="width: 100%;" data-tooltip="Auditor initiates GET /data, gets 402, and resolves it via POST /pay"><span class="arrow-label">POST /pay</span></div>
+            <div class="arrow-right amber" style="width: 100%;" data-tooltip="Transporter verifies payment and releases the raw CSV payload"><span class="arrow-label">CSV Payload</span></div>
+         </div>
+      </div>
+
+
+      <div class="layer swarm">
+        <div class="layer-title">AUDITOR SWARM</div>
+        
+        <div class="layer-row">
+          <div class="node auditor-node mini" data-tooltip="Listens for anomalies on Port 5005 and passes the trigger to the bidding logic.">
+            <div class="node-header"><div class="title-wrapper"><div class="node-icon icon-py"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 11a9 9 0 0 1 9 9"></path></svg></div><span class="node-type">UDP LISTENER</span></div><span class="node-id">P 5005</span></div>
+            <div class="node-body" style="padding: 14px 12px;">
+               <div class="data-row"><span class="data-label">Listen</span><span class="data-val">0.0.0.0</span></div>
+               <div class="data-row"><span class="data-label">Receives</span><span class="tag amber">PKT_ANOMALY</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="v-space">
+          <div class="arrow-down-container" style="position: absolute; left: 80px;" data-tooltip="Triggers the bidding evaluation logic.">
+             <div class="arrow-down"><span class="arrow-label">evaluate</span></div>
+          </div>
+        </div>
+
+        <div class="layer-row">
+          <div class="node auditor-node mini" data-tooltip="Evaluates the anomaly broadcast and constructs a bid to participate in the quorum.">
+            <div class="node-header"><div class="title-wrapper"><div class="node-icon icon-flow" style="background: rgba(74, 184, 240, 0.15); border-color: rgba(74, 184, 240, 0.3); stroke: var(--blue);"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path></svg></div><span class="node-type">BIDDING MODULE</span></div><span class="node-id">bid.py</span></div>
+            <div class="node-body">
+               <div class="data-row"><span class="data-label">Strategy</span><span class="data-val">Max ROI</span></div>
+               <div class="data-row"><span class="data-label">Lock Amt</span><span class="data-val">1.0 FLOW</span></div>
+               <div class="data-row" style="margin-top: 4px;"><span class="data-label">Action</span><span class="tag blue">Send PKT_BID</span></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="v-space">
+          <div class="arrow-down-container" style="position: absolute; left: 80px;" data-tooltip="If accepted into Quorum, triggers the X402 client to pull data.">
+             <div class="arrow-down"><span class="arrow-label">fetch data</span></div>
+          </div>
+        </div>
+
+        <div class="layer-row">
+          <div class="node transparent mini" data-tooltip="Connects to Transporter's server, handles the 402 Payment Required flow, and downloads the raw CSV.">
+            <div class="node-header" style="background: transparent; border-bottom: none;"><div class="title-wrapper"><div class="node-icon icon-api"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="10"></circle></svg></div><span class="node-type" style="color: var(--t2);">X402 CLIENT</span></div></div>
+            <div class="node-body" style="padding-top: 0;">
+              <div class="data-row"><span class="data-label">Target</span><span class="data-val">Transporter IP</span></div>
+              <div class="data-row"><span class="data-label">Auth</span><span class="code-text">Sign(Tx Hash)</span></div>
+            </div>
+          </div>
+
+          <div class="arrow-right" style="width: 25px;" data-tooltip="Routes the downloaded CSV dataset into the random-forest model."><span class="arrow-label">verify()</span></div>
+
+          <div class="node auditor-node large" style="border-width: 2px; border-color: rgba(74, 184, 240, 0.4);" data-tooltip="Processes the locked CSV data through an ML model to generate an independent verdict.">
+            <div class="node-header"><div class="title-wrapper"><div class="node-icon icon-ml"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44"></path></svg></div><span class="node-type">ML VERIFICATION</span></div><span class="node-id">RF Model</span></div>
+            <div class="node-body">
+              <div class="data-row"><span class="data-label">Input</span><span class="code-text">50x7 Tensor (CSV)</span></div>
+              <div class="data-row"><span class="data-label">Verdict</span><span class="tag amber">ANOMALY (~0.91)</span></div>
+              <div class="data-row" style="margin-top: 4px;"><span class="data-label">Action</span><span class="data-val">Sign: {pub}:{verdict}</span></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div> 
+    
+    <div style="display: flex; justify-content: space-between; padding: 0 10%; margin-top: -6px; margin-bottom: 2px;">
+       <div class="arrow-down-container" style="margin-left: 5%; height: 30px;" data-tooltip="Phase 1: Transporter registers event on-chain."><div class="arrow-down"><span class="arrow-label" style="color: var(--amber); border-color: var(--amberD);">registerEvent()</span></div></div>
+       
+       <div class="arrow-down-container" style="margin-left: 31%; height: 30px;" data-tooltip="Phase 1.5: Auditors deposit 0.5 FLOW bond into the contract."><div class="arrow-down"><span class="arrow-label" style="color: var(--blue); border-color: var(--blueD);">recordDeposit()</span></div></div>
+
+       <div class="arrow-down-container" style="margin-right: 13.5%; height: 30px;" data-tooltip="Phase 2: Auditors submit signed verifications on-chain for final settlement."><div class="arrow-down"><span class="arrow-label" style="color: var(--green); border-color: var(--greenD);">submitVerdict()</span></div></div>
+    </div>
+
+    <div class="layer settlement">
+      <div class="layer-title">FLOW SMART CONTRACT</div>
+      
+      <div class="node contract-node" data-tooltip="Orchestrates the lifecycle: registers event, locks deposits, accepts verdicts, and executes final payout logic.">
+        <div class="node-header"><div class="title-wrapper"><div class="node-icon icon-flow"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon></svg></div><span class="node-type">TX PIPELINE</span></div><span class="node-id">Testnet</span></div>
+        <div class="node-body">
+          <div class="data-row"><span class="data-label">Phase 1</span><span class="data-val">registerAnomaly</span></div>
+          <div class="data-row"><span class="data-label">Phase 1.5</span><span class="data-val">recordDeposit(0.5F)</span></div>
+          <div class="data-row"><span class="data-label">Phase 2</span><span class="data-val">submitVerdict</span></div>
+          <div class="data-row"><span class="data-label">Phase 3</span><span class="code-text" style="color: var(--green);">finalizeEvent</span></div>
+        </div>
+      </div>
+
+      <div class="arrow-right" style="width: 40px;" data-tooltip="Resolves consensus, processes escrows, and computes reputation deltas."><span class="arrow-label">finalize()</span></div>
+
+      <div class="node transparent large" data-tooltip="Consensus is established by active nodes. Reputation deltas are applied using symmetrical proximity.">
+        <div class="node-header" style="background: transparent;"><div class="title-wrapper"><div class="node-icon icon-math"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><line x1="19" y1="5" x2="5" y2="19"></line></svg></div><span class="node-type" style="color: var(--t1);">C_SWARM</span></div></div>
+        <div class="node-body" style="padding-top: 0;">
+           <div class="data-row"><span class="data-label">Consensus</span><span class="data-val">drop > (active/2)</span></div>
+           <div class="data-row"><span class="data-label">CSwarm</span><span class="data-val">avg(conf)</span></div>
+           <div class="data-row"><span class="data-label">Rep Delta</span><span class="code-text">alpha * (1-2*dist)</span></div>
+           <div class="data-row" style="margin-top: 6px;"><span class="data-label">Base Vals</span><span class="data-val">alpha=10.0, beta=5.0</span></div>
+        </div>
+      </div>
+
+      <div class="arrow-right" style="width: 40px;" data-tooltip="Writes ultimate settlement state directly to the decentralized ledger."><span class="arrow-label">Ledger</span></div>
+
+      <div class="col" style="flex: 1; min-width: 280px; max-width: 320px;">
+        <div class="node transparent" style="padding: 12px;" data-tooltip="Auditors rewarded for alignment, penalized for deviation or silence.">
+           <div style="font-size: 9.5px; font-weight: 700; color: var(--green); letter-spacing: 0.1em; margin-bottom: 6px;">AUDITOR SETTLEMENT</div>
+           <ul class="outcome-list">
+             <li><span style="color: var(--t1);">ALIGNED:</span> Keeps dep, earns bid, +Rep</li>
+             <li><span style="color: var(--amber);">DEVIATED:</span> Keeps dep, loses bid, -Rep</li>
+             <li><span style="color: var(--red);">SILENT:</span> Loses dep(0.5F), loses bid, -10 Rep</li>
+           </ul>
+        </div>
+
+        <div class="node transparent" style="padding: 12px; border-color: rgba(245, 166, 35, 0.4);" data-tooltip="Transporter stake slashed if their anomaly contradicts swarm consensus.">
+           <div style="font-size: 9.5px; font-weight: 700; color: var(--amber); letter-spacing: 0.1em; margin-bottom: 6px;">TRANSPORTER SETTLEMENT</div>
+           <ul class="outcome-list">
+             <li><span style="color: var(--t1);">MATCHED:</span> +2 Rep, gets silent deps</li>
+             <li><span style="color: var(--red);">SLASHED:</span> -10 Rep, loses escrows</li>
+             <li style="margin-top: 6px; color: var(--blue);">+ triggers updateEventCid</li>
+           </ul>
+        </div>
+      </div>
+	<div class="arrow-right" style="width: 40px;" data-tooltip="Writes ultimate settlement state directly to the decentralized ledger."><span class="arrow-label">updateEventCid</span></div>
+	  <div class="node transparent" style="padding: 12px; border-color: rgba(245, 166, 35, 0.4);" data-tooltip="Transporter stake slashed if their anomaly contradicts swarm consensus.">
+           <div style="font-size: 9.5px; font-weight: 700; color: var(--amber); letter-spacing: 0.1em; margin-bottom: 6px;">STORACHA UPLOAD</div>
+           <ul class="outcome-list">
+             <li> The CSV is encrypted and uploaded onto Storacha.</li>
+             <li> The containerId is then updated on the flow.</li>
+     
+           </ul>
+        </div>
+
+    </div>
+
+  </div>
+
+</body>
+</html>

@@ -63,6 +63,9 @@ export default function TopBar({
       )}
 
       <div style={{ flex: 1 }} />
+      <button onClick={() => navigate("/sensensus")}>
+        Sensensus
+      </button>
 
       {/* Flow connection */}
       <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
