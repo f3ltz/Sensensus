@@ -1,5 +1,5 @@
 /*
- * SwarmVerifier — Transporter Firmware
+ * SenSensus — Transporter Firmware
  * Board: Raspberry Pi Pico 2W (RP2350)
  *
  * State machine:
@@ -154,7 +154,7 @@ static void _close_delivery_window() {
 void setup() {
     Serial.begin(115200);
     delay(1500);
-    Serial.println("\n=== SwarmVerifier Transporter ===");
+    Serial.println("\n=== SenSensus Transporter ===");
 
     // ── Crypto: key generation ────────────────────────────────────────────────
     crypto_init();
