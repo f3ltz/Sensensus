@@ -308,8 +308,8 @@ class AuditorNode:
         while True:
             try:
                 readable, _, _ = select.select([sock, self.unicast_sock], [], [])
-                for sock in readable:
-                    data, addr = sock.recvfrom(1024)
+                for s in readable:
+                    data, addr = s.recvfrom(1024)
                     if not data: continue
                     
                     pkt_type = data[0]
