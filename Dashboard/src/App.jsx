@@ -113,7 +113,13 @@ export default function App() {
 
   if (isLatestRecent && latestEvent) {
     highlightedIds.add(latestEvent.transporter_id);
-    if (latestEvent.transporter_slashed) recentDeltas[latestEvent.transporter_id] = -5.0;
+    
+    // Updated to match the new SwarmVerifierV4 Cadence contract
+    if (latestEvent.transporter_slashed) {
+      recentDeltas[latestEvent.transporter_id] = -10.0; // The False Positive penalty
+    } else {
+      recentDeltas[latestEvent.transporter_id] = 2.0;   // The True Positive reward
+    }
 
     latestResults.forEach((r) => {
       highlightedIds.add(r.auditorId);
@@ -121,7 +127,7 @@ export default function App() {
     });
   }
   // ----------------------------
-  // ----------------------------
+
 
   return (
     <div className="dash-root">

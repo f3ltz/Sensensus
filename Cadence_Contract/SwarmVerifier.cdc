@@ -331,7 +331,7 @@ access(all) contract SwarmVerifierV4 {
             self.finalizeEvent(eventId: eventId)
         }
     }
-
+    
     // ── Phase 3: finalizeEvent ────────────────────────────────────────────────
 
     access(all) fun finalizeEvent(eventId: String) {
@@ -357,6 +357,7 @@ access(all) contract SwarmVerifierV4 {
             }
         }
         
+        // Calculate cswarm using ONLY active nodes
         let cswarm: UFix64 = activeNodes > 0 
             ? (confidenceSum / UFix64(activeNodes)) 
             : 0.0
@@ -396,29 +397,37 @@ access(all) contract SwarmVerifierV4 {
                 auditorAgent.removeStake(amount: deposit)
                 depositsSeized = depositsSeized + deposit
                 
-                delta = -10.0
+                delta = -10.0 // Hardcoded silent penalty
                 auditorAgent.applyReputationDelta(delta: delta)
                 outcome = "silent"
                 
-            } else if aligned {
-                // Auditor keeps deposit; earns the bid; gains rep
-                auditorAgent.addStake(amount: bid)
-                bidsPaidOut = bidsPaidOut + bid
-                totalReceived = deposit + bid
-                
-                delta = SwarmVerifierV4.alpha * (cswarmF - Fix64(confidence))
-                auditorAgent.applyReputationDelta(delta: delta)
-                auditorAgent.recordAudit(wasCorrect: true)
-                outcome = "aligned"
-                
             } else {
-                // Auditor keeps deposit; loses the bid; loses rep
-                totalReceived = deposit
+                // ---> NEW: Symmetrical Proximity Math <---
+                let confF = Fix64(confidence)
+                let distance = cswarmF > confF ? (cswarmF - confF) : (confF - cswarmF)
                 
-                delta = SwarmVerifierV4.alpha * (cswarmF - Fix64(confidence)) - SwarmVerifierV4.beta
+                // Maps distance (0.0 to 1.0) to a multiplier (+1.0 to -1.0)
+                delta = SwarmVerifierV4.alpha * (1.0 - (2.0 * distance))
+                
+                // Apply the flat penalty if their binary vote was wrong
+                if !aligned { 
+                    delta = delta - SwarmVerifierV4.beta 
+                }
+                
                 auditorAgent.applyReputationDelta(delta: delta)
-                auditorAgent.recordAudit(wasCorrect: false)
-                outcome = "deviated"
+                auditorAgent.recordAudit(wasCorrect: aligned)
+
+                if aligned {
+                    // Auditor keeps deposit; earns the bid
+                    auditorAgent.addStake(amount: bid)
+                    bidsPaidOut = bidsPaidOut + bid
+                    totalReceived = deposit + bid
+                    outcome = "aligned"
+                } else {
+                    // Auditor keeps deposit; loses the bid
+                    totalReceived = deposit
+                    outcome = "deviated"
+                }
             }
 
             SwarmVerifierV4.networkAgents[id] = auditorAgent
@@ -448,13 +457,12 @@ access(all) contract SwarmVerifierV4 {
         if activeNodes > 0 {
             if (pendingEvent.anomalyConfidence >= 0.85) != consensusVerdict {
                 // Transporter was wrong: Slash stake and reputation
-                // We slash an amount equal to their total bid escrow as a flat penalty
                 transporterAgent.removeStake(amount: totalBidEscrow)
                 transporterSlashed = true
-                transporterAgent.applyReputationDelta(delta: -10.0)
+                transporterAgent.applyReputationDelta(delta: -10.0) // Hardcoded penalty
             } else {
                 // Transporter was right: Gain reputation
-                transporterAgent.applyReputationDelta(delta: 2.0)
+                transporterAgent.applyReputationDelta(delta: 2.0)   // Hardcoded reward
             }
         }
         
