@@ -6,8 +6,10 @@ from mock.constants import MULTICAST_GROUP, MULTICAST_PORT, BID_PORT
 from mock.crypto import _verify
 from mock.state import state
 
+# ── UDP Networking (Beacons & Bids) ───────────────────────────────────────────
 
 def multicast_listener():
+    """Listens for PKT_BEACON to build the registry of available auditors."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
@@ -23,6 +25,7 @@ def multicast_listener():
 
 
 def bid_listener():
+    """Listens for PKT_BID from auditors responding to anomalies."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(('', BID_PORT))
@@ -84,6 +87,7 @@ def _handle_bid(data: bytes, addr):
 
 
 def _send_quorum_notifications(quorum: dict):
+    """Broadcasts PKT_QUORUM to alert selected auditors."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
     for pub_hex, ip in quorum.items():

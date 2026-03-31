@@ -6,8 +6,13 @@ from mock.constants import ALPHA, BETA, ANOMALY_THRESHOLD, FLOW_ENABLED
 from mock.flow import _finalize_event_on_flow, _update_cid_on_flow
 from mock.state import state
 
+# ── Consensus & Settlement Logic ──────────────────────────────────────────────
 
 def _finalize_event():
+    """
+    Computes final CSwarm consensus, identifies true/false positives, issues slashing 
+    or rewards formulas, and simulates Storacha upload to record evidence CID.
+    """
     saved_event_id = state.current_event_id
     with state.verdicts_lock:
         received = dict(state.verdicts)
@@ -65,22 +70,18 @@ def _finalize_event():
     print(f"  Drop votes   : {drop_votes}/{n}")
     print(f"  Cswarm       : {cswarm:.4f}")
     print(f"  Consensus    : {'DROP CONFIRMED' if consensus_verdict else 'NORMAL — false positive'}")
-    print(f"  Transporter  : conf={state.anomaly_confidence:.4f}  "
-          f"claimed_drop={transporter_claimed_drop}  "
-          f"slashed={transporter_slashed}")
+    print(f"  Transporter  : conf={state.anomaly_confidence:.4f}  claimed_drop={transporter_claimed_drop}  slashed={transporter_slashed}")
     print("─" * 64)
     for r in auditor_results:
         status  = "✓ aligned" if r["aligned"] else ("✗ silent" if r["silent"] else "✗ deviated")
         verdict = "DROP" if r["verdict"] else "NORM"
-        print(f"  {r['pubkey_hex'][:12]}...  {verdict}  conf={r['confidence']:.4f}  "
-              f"ΔR={r['delta']:+.4f}  {status}")
+        print(f"  {r['pubkey_hex'][:12]}...  {verdict}  conf={r['confidence']:.4f}  ΔR={r['delta']:+.4f}  {status}")
     print("═" * 64)
 
     saved_event_id = state.current_event_id
     if FLOW_ENABLED and saved_event_id:
         print("[Flow] Calling finalizeEvent on-chain...")
-        threading.Thread(target=_finalize_event_on_flow,
-                         args=(saved_event_id,), daemon=True).start()
+        threading.Thread(target=_finalize_event_on_flow, args=(saved_event_id,), daemon=True).start()
 
     print("[Storacha] Simulating post-consensus bundle upload...")
     time.sleep(0.3)
@@ -89,8 +90,7 @@ def _finalize_event():
 
     if FLOW_ENABLED and saved_event_id:
         print("[Flow] Calling updateEventCid on-chain...")
-        threading.Thread(target=_update_cid_on_flow,
-                         args=(saved_event_id, cid), daemon=True).start()
+        threading.Thread(target=_update_cid_on_flow, args=(saved_event_id, cid), daemon=True).start()
         flow_tx = "submitted"
     else:
         flow_tx = "0x" + secrets.token_hex(8)

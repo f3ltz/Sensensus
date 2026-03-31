@@ -1,8 +1,13 @@
 from mock.constants import W_PRICE, W_REP, W_STAKE, QUORUM_SIZE
 from mock.flow import _query_flow_stake_reputation
 
+# ── Quorum Selection ──────────────────────────────────────────────────────────
 
 def _select_quorum(bids: dict) -> dict:
+    """
+    Ranks bidders based on price, reputation, and staked tokens on Flow testnet,
+    then selects the top QUORUM_SIZE auditors for verification.
+    """
     if not bids:
         return {}
 
@@ -14,7 +19,10 @@ def _select_quorum(bids: dict) -> dict:
         if price <= 0.0:
             print(f"[Quorum]   {pub_hex[:12]}... price={price} — skipping (invalid price)")
             continue
+        
+        # Weighted Scoring Formula
         score = W_PRICE * (1.0 / price) + W_REP * rep + W_STAKE * stake
+        
         scored.append({
             "pubkey_hex": pub_hex,
             "ip":         bid["ip"],
@@ -23,8 +31,7 @@ def _select_quorum(bids: dict) -> dict:
             "reputation": rep,
             "score":      score,
         })
-        print(f"[Quorum]   {pub_hex[:12]}...  price={price:.4f}  stake={stake:.2f}  "
-              f"rep={rep:.4f}  score={score:.4f}")
+        print(f"[Quorum]   {pub_hex[:12]}...  price={price:.4f}  stake={stake:.2f}  rep={rep:.4f}  score={score:.4f}")
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     top = scored[:QUORUM_SIZE]

@@ -3,7 +3,6 @@ import base64
 import json
 import os
 import threading
-
 import requests
 from ecdsa import NIST256p, SigningKey
 from flow_py_sdk import flow_client
@@ -17,10 +16,12 @@ from mock.constants import (
 from mock.crypto import _EcdsaSigner
 from mock.state import state
 
+# ── Cadence Scripts & Flow Blockchain Integration ─────────────────────────────
+
 _flow_tx_lock = threading.Lock()
 
-
 def _decode_cadence(v):
+    """Helper to decode Flow Cadence types into standard Python types."""
     if v is None:
         return None
     t = v.get("type") if isinstance(v, dict) else None
@@ -28,8 +29,7 @@ def _decode_cadence(v):
         return v["value"]
     if t in ("Fix64", "UFix64"):
         return float(v["value"])
-    if t in ("Int", "UInt", "Int8", "UInt8", "Int16", "UInt16",
-             "Int32", "UInt32", "Int64", "UInt64"):
+    if t in ("Int", "UInt", "Int8", "UInt8", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64"):
         return int(v["value"])
     if t == "Bool":
         return v["value"]
@@ -39,8 +39,8 @@ def _decode_cadence(v):
         return _decode_cadence(v["value"]) if v.get("value") is not None else None
     return v.get("value") if isinstance(v, dict) else v
 
-
 async def _flow_tx_async(script, build_args_fn, label, wait_seal=False):
+    """Generic executor for Flow Blockchain transactions."""
     flow_addr = os.environ.get("FLOW_ACCOUNT_ADDR", "").removeprefix("0x")
     flow_key  = os.environ.get("FLOW_ACCOUNT_KEY",  "").removeprefix("0x")
     if not flow_addr or not flow_key:
@@ -68,18 +68,17 @@ async def _flow_tx_async(script, build_args_fn, label, wait_seal=False):
                 tx.add_authorizers(Address.from_hex(flow_addr))
                 sk     = SigningKey.from_string(bytes.fromhex(flow_key), curve=NIST256p)
                 signer = _EcdsaSigner(sk)
-                tx = tx.with_envelope_signature(
-                    Address.from_hex(flow_addr),
-                    account_key.index,
-                    signer,
-                )
+                tx = tx.with_envelope_signature(Address.from_hex(flow_addr), account_key.index, signer)
+                
                 timeout = 60.0 if wait_seal else 30.0
                 result  = await client.execute_transaction(tx, wait_for_seal=wait_seal, timeout=timeout)
                 tx_id   = result.id.hex() if hasattr(result.id, "hex") else str(result.id)
+                
                 print(f"[Flow] ✓ {label} submitted → TX {tx_id}")
                 print(f"[Flow]   https://testnet.flowscan.io/tx/{tx_id}")
                 if wait_seal:
                     print(f"[Flow] ✓ {label} sealed")
+                
                 state.register_sealed.set()
                 return tx_id
         except Exception as e:
@@ -96,6 +95,7 @@ async def _flow_tx_async(script, build_args_fn, label, wait_seal=False):
             state.register_sealed.set()
             return None
 
+# ── On-Chain Registration & Actions ───────────────────────────────────────────
 
 def _register_transporter_on_flow():
     if not FLOW_ENABLED:
@@ -126,13 +126,10 @@ def _register_transporter_on_flow():
         else:
             print("[Flow] Transporter already registered on-chain.")
 
-
 def _register_anomaly_on_flow(quorum: dict):
     if not FLOW_ENABLED:
-        print(f"[Flow] (simulated) registerAnomaly("
-              f"submission_sig={state.current_event_id[:16]}...  "
-              f"quorum={len(quorum)}  "
-              f"conf={state.anomaly_confidence:.4f})")
+        print(f"[Flow] (simulated) registerAnomaly(submission_sig={state.current_event_id[:16]}... "
+              f"quorum={len(quorum)} conf={state.anomaly_confidence:.4f})")
         return
 
     cadence = (
@@ -144,11 +141,8 @@ def _register_anomaly_on_flow(quorum: dict):
         "    prepare(signer: &Account) {}\n"
         "    execute {\n"
         "        SwarmVerifierV4.registerAnomaly(\n"
-        "            transporterId: transporterId,\n"
-        "            submissionSig: submissionSig,\n"
-        "            anomalyConfidence: anomalyConfidence,\n"
-        "            quorumIds: quorumIds,\n"
-        "            bidPrices: bidPrices\n"
+        "            transporterId: transporterId, submissionSig: submissionSig,\n"
+        "            anomalyConfidence: anomalyConfidence, quorumIds: quorumIds, bidPrices: bidPrices\n"
         "        )\n"
         "    }\n"
         "}"
@@ -168,7 +162,6 @@ def _register_anomaly_on_flow(quorum: dict):
 
     with _flow_tx_lock:
         asyncio.run(_flow_tx_async(cadence, build, "registerAnomaly", wait_seal=True))
-
 
 def _submit_deposit_on_flow(event_id: str, auditor_pub_hex: str) -> bool:
     if not FLOW_ENABLED:
@@ -198,7 +191,6 @@ def _submit_deposit_on_flow(event_id: str, auditor_pub_hex: str) -> bool:
         print(f"[Flow] recordDeposit error: {e}")
         return False
 
-
 def _update_cid_on_flow(event_id: str, cid: str):
     if not FLOW_ENABLED:
         return
@@ -222,7 +214,6 @@ def _update_cid_on_flow(event_id: str, cid: str):
     except Exception as e:
         print(f"[Flow] updateEventCid error: {e}")
 
-
 def _finalize_event_on_flow(event_id: str):
     if not FLOW_ENABLED:
         return
@@ -241,7 +232,6 @@ def _finalize_event_on_flow(event_id: str):
     with _flow_tx_lock:
         asyncio.run(_flow_tx_async(cadence, build, "finalizeEvent", wait_seal=True))
 
-
 def _query_flow_stake_reputation(pubkey_hex: str) -> tuple:
     if not FLOW_ENABLED:
         return (0.0, 0.0)
@@ -258,16 +248,10 @@ access(all) fun main(pubkey: String): [AnyStruct] {{
 """.strip()
 
     encoded_script = base64.b64encode(script.encode()).decode()
-    encoded_arg    = base64.b64encode(
-        json.dumps({"type": "String", "value": pubkey_hex}).encode()
-    ).decode()
+    encoded_arg    = base64.b64encode(json.dumps({"type": "String", "value": pubkey_hex}).encode()).decode()
 
     try:
-        resp = requests.post(
-            FLOW_REST_URL,
-            json={"script": encoded_script, "arguments": [encoded_arg]},
-            timeout=5,
-        )
+        resp = requests.post(FLOW_REST_URL, json={"script": encoded_script, "arguments": [encoded_arg]}, timeout=5)
         if resp.status_code != 200:
             try:
                 err = resp.json()
@@ -290,7 +274,6 @@ access(all) fun main(pubkey: String): [AnyStruct] {{
         stake = float(values[0]) if values[0] is not None else 0.0
         rep   = float(values[1]) if values[1] is not None else 0.0
         return (stake, rep)
-
     except Exception as e:
         print(f"[Flow] Query error for {pubkey_hex[:12]}...: {e}")
         return (0.0, 0.0)

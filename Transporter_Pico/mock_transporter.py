@@ -1,7 +1,6 @@
 import threading
 import time
 from http.server import HTTPServer
-
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,8 +12,10 @@ from mock.transporter_http import TransporterHTTP
 from mock.state import state
 from mock.udp import bid_listener, multicast_listener
 
+# ── Entry Point (CLI & Services) ──────────────────────────────────────────────
 
 def cli():
+    """Interactive command-line interface to trigger flows manually."""
     print("\nMock Transporter ready.")
     print("Commands:  [a] trigger anomaly    [r] show registry    [q] quit\n")
     while True:
@@ -49,9 +50,10 @@ def cli():
         else:
             print("  Unknown command.")
 
-
 if __name__ == "__main__":
+    # Boot sequence: Flow blockchain -> UDP networking -> HTTP endpoints -> Interactive CLI
     _register_transporter_on_flow()
+    
     threading.Thread(target=multicast_listener, daemon=True).start()
     threading.Thread(target=bid_listener,       daemon=True).start()
 

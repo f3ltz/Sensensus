@@ -10,6 +10,7 @@ from mock.flow import _submit_deposit_on_flow
 from mock.settlement import _finalize_event
 from mock.state import state
 
+# ── HTTP Server (Data Delivery & Verdict Collection) ──────────────────────────
 
 class TransporterHTTP(BaseHTTPRequestHandler):
 
@@ -38,6 +39,8 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         except BrokenPipeError:
             pass
 
+    # ── GET Methods ───────────────────────────────────────────────────────────
+
     def do_GET(self):
         parsed    = urlparse(self.path)
         client_ip = self.client_address[0]
@@ -51,6 +54,8 @@ class TransporterHTTP(BaseHTTPRequestHandler):
             self._handle_data(pubkey_hex, client_ip)
             return
         self._send_json(404, {"error": "not found"})
+
+    # ── POST Methods ──────────────────────────────────────────────────────────
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -68,7 +73,10 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"error": "not found"})
 
+    # ── Route Handlers ────────────────────────────────────────────────────────
+
     def _handle_state(self):
+        """Returns the current state for visualization / dashboard."""
         with state.registry_lock:
             registry = {
                 pub: {
@@ -110,6 +118,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         })
 
     def _handle_data(self, pubkey_hex, client_ip):
+        """Issues an x402 payment challenge to a valid quorum auditor."""
         if not pubkey_hex or len(pubkey_hex) != 128:
             self._send_json(400, {"error": "missing or invalid ?pubkey query param"})
             return
@@ -136,6 +145,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         })
 
     def _handle_pay(self, body: dict):
+        """Verifies x402 response, submits deposit, and releases the IMU CSV payload."""
         client_ip  = self.client_address[0]
         pubkey_hex = body.get("pubkey", "")
         sig_hex    = body.get("signature", "")
@@ -189,6 +199,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
         })
 
     def _handle_verdict(self, body: dict):
+        """Receives and validates verdicts from auditors."""
         client_ip = self.client_address[0]
 
         event_id        = body.get("event_id",           "")
@@ -212,8 +223,7 @@ class TransporterHTTP(BaseHTTPRequestHandler):
             return
 
         if event_id != state.current_event_id:
-            print(f"[Verdict] {client_ip} event_id mismatch: got {event_id[:16]}... "
-                  f"expected {state.current_event_id[:16]}...")
+            print(f"[Verdict] {client_ip} event_id mismatch: got {event_id[:16]}... expected {state.current_event_id[:16]}...")
             self._send_json(409, {"error": "event_id does not match active event"})
             return
 

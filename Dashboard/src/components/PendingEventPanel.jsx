@@ -48,9 +48,9 @@ function ConsensusMeter({ verdictMap, quorumSize }) {
   return (
     <div className="tug-meter-wrapper">
       <div className="tug-meter-labels">
-        <span className={dropCount > 0 ? "drop-label" : ""}>🚨 {dropCount} DROP</span>
+        <span className={dropCount > 0 ? "drop-label" : ""}>{dropCount} DROP</span>
         <span className="threshold-label">RACE TO QUORUM ({quorumSize})</span>
-        <span className={normCount > 0 ? "norm-label" : ""}>{normCount} NORM ✅</span>
+        <span className={normCount > 0 ? "norm-label" : ""}>{normCount} NORM </span>
       </div>
       <div className="tug-meter-track">
         {/* Drop bar races from the left */}

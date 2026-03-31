@@ -1,12 +1,9 @@
 import socket
 import threading
 import time
-
 import numpy as np
 
-from mock.constants import (
-    MULTICAST_GROUP, MULTICAST_PORT, BID_WINDOW_S, VERDICT_TIMEOUT_S, FLOW_ENABLED,
-)
+from mock.constants import MULTICAST_GROUP, MULTICAST_PORT, BID_WINDOW_S, VERDICT_TIMEOUT_S, FLOW_ENABLED
 from mock.flow import _register_anomaly_on_flow, _finalize_event_on_flow
 from mock.imu import _generate_drop_csv
 from mock.quorum import _select_quorum
@@ -14,8 +11,13 @@ from mock.settlement import _finalize_event
 from mock.state import state
 from mock.udp import _send_quorum_notifications
 
+# ── Anomaly Trigger & Lifecycle Management ────────────────────────────────────
 
 def trigger_anomaly():
+    """
+    Simulates a drone drop detection. Generates mock IMU data, broadcasts a PKT_ANOMALY
+    beacon to auditors, collects bids, selects a quorum, and manages the verdict window.
+    """
     state.csv_data           = _generate_drop_csv()
     state.anomaly_confidence = round(float(np.random.uniform(0.87, 0.99)), 4)
 
@@ -28,6 +30,7 @@ def trigger_anomaly():
     except Exception:
         pass
 
+    # Clean per-event state for a new cycle
     with state.bids_lock:
         state.bids.clear()
     with state.verdicts_lock:
@@ -40,11 +43,13 @@ def trigger_anomaly():
     state.system_status    = "ANOMALY"
     state.register_sealed.clear()
 
+    # ── Phase 1: Broadcast Anomaly & Collect Bids ─────────────────────────────
     packet = state.build_anomaly_packet()
     sock   = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
     sock.sendto(packet, (MULTICAST_GROUP, MULTICAST_PORT))
     sock.close()
+    
     print(f"\n[Anomaly] Broadcast PKT_ANOMALY | confidence={state.anomaly_confidence:.4f}")
     print(f"[Anomaly] Collecting bids for {BID_WINDOW_S}s...")
 
@@ -59,6 +64,7 @@ def trigger_anomaly():
         state.system_status = "IDLE"
         return
 
+    # ── Phase 2: Select Quorum & On-Chain Registration ────────────────────────
     quorum = _select_quorum(all_bids)
 
     if not quorum:
@@ -68,7 +74,6 @@ def trigger_anomaly():
 
     state.quorum            = quorum
     state.expected_verdicts = len(quorum)
-
     state.current_event_id = state.build_submission_sig(list(quorum.keys()))
 
     src = "Flow-ranked" if FLOW_ENABLED else "local (bid price only)"
@@ -79,15 +84,10 @@ def trigger_anomaly():
     print(f"[Anomaly] submission_sig (event_id)={state.current_event_id[:24]}...")
 
     state.register_sealed.clear()
-
-    register_thread = threading.Thread(
-        target=_register_anomaly_on_flow, args=(quorum,), daemon=True
-    )
-    register_thread.start()
-
+    threading.Thread(target=_register_anomaly_on_flow, args=(quorum,), daemon=True).start()
     _send_quorum_notifications(quorum)
 
-        # NEW
+    # ── Phase 3: Verdict Window & Delivery ────────────────────────────────────
     state.system_status = "DELIVERING"
     print(f"[Anomaly] HTTP server armed. Waiting up to {VERDICT_TIMEOUT_S}s for verdicts...")
 
@@ -134,6 +134,7 @@ def trigger_anomaly():
             print(f"[Anomaly] Verdict timeout — {received}/{state.expected_verdicts} received")
         _finalize_event()
 
+    # ── Cleanup ───────────────────────────────────────────────────────────────
     state.quorum.clear()
     with state.nonces_lock:
         state.nonces.clear()

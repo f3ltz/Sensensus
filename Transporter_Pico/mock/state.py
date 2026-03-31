@@ -5,16 +5,19 @@ import threading
 import time
 
 from ecdsa import NIST256p, SigningKey
-
 from mock.crypto import _sign
 
+# ── Global State Management ───────────────────────────────────────────────────
 
 class TransporterState:
+    """Centralized state manager for the mock transporter."""
     def __init__(self):
+        # ── Cryptographic identity ────────────────────────────────────────────
         self.sk, self.vk = self._load_or_generate_keypair("../Identities/transporter_identity.pem")
         self.pub_bytes   = self.vk.to_string()
         self.pub_hex     = self.pub_bytes.hex()
 
+        # ── Network & Registry State ──────────────────────────────────────────
         self.registry      = {}
         self.registry_lock = threading.Lock()
 
@@ -24,12 +27,14 @@ class TransporterState:
 
         self.quorum = {}
 
+        # ── Data Delivery State ───────────────────────────────────────────────
         self.nonces      = {}
         self.nonces_lock = threading.Lock()
 
         self.issued_payload_sigs      = {}
         self.issued_payload_sigs_lock = threading.Lock()
 
+        # ── Per-Event State ───────────────────────────────────────────────────
         self.current_event_id:   str   = ""
         self.anomaly_confidence: float = 0.93
         self.csv_data:           str   = ""
@@ -38,9 +43,11 @@ class TransporterState:
         self.verdicts_lock     = threading.Lock()
         self.expected_verdicts = 0
 
+        # Flow blockchain synchronization event
         self.register_sealed = threading.Event()
         self.register_sealed.set()
 
+        # ── Lifecycle & Monitoring ────────────────────────────────────────────
         self.system_status  = "IDLE"
         self.settled_events = []
         self.events_lock    = threading.Lock()
@@ -50,6 +57,7 @@ class TransporterState:
 
     @staticmethod
     def _load_or_generate_keypair(key_path: str):
+        """Loads existing identity or generates a new one."""
         if os.path.exists(key_path):
             with open(key_path, "rb") as f:
                 sk = SigningKey.from_pem(f.read())
@@ -60,6 +68,8 @@ class TransporterState:
                 f.write(sk.to_pem())
             print(f"[Transporter] Generated new identity, saved to {key_path}")
         return sk, sk.verifying_key
+
+    # ── Packet Building Helpers ───────────────────────────────────────────────
 
     def build_anomaly_packet(self) -> bytes:
         header     = struct.pack('<B', 0x03)
@@ -111,6 +121,5 @@ class TransporterState:
             self.issued_payload_sigs[auditor_pubkey_hex] = sig_hex
 
         return body
-
 
 state = TransporterState()
