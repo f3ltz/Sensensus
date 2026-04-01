@@ -2,6 +2,8 @@
 # SENSENSUS
 **Zero-Trust IoT Swarms Secured by TinyML, Cryptography, and Web3 Staking.**
 
+🌐 **Live Dashboard Demo:** [Launch Sensensus Mission Control](https://sensensus.vercel.app/)
+
 ![Flow](https://img.shields.io/badge/Blockchain-Flow_Testnet-16FF96?style=for-the-badge&logo=flow)
 ![TinyML](https://img.shields.io/badge/Edge_AI-TensorFlow_Lite-FF6F00?style=for-the-badge&logo=tensorflow)
 ![Hardware](https://img.shields.io/badge/Hardware-Pi_Pico_2W-C51A4A?style=for-the-badge&logo=raspberrypi)
@@ -13,9 +15,14 @@ In industries spanning supply chain logistics, high-value asset insurance, and r
 Spoofing an IoT sensor is trivial. If a bad actor physically compromises a single sensor, alters its calibration, or injects fake network packets into the data stream, they can trigger fraudulent insurance claims, hide equipment damage, or disrupt global logistics. Traditional centralized networks blindly trust the data source, creating a massive single point of failure that cannot be solved by software alone.
 
 ## The Solution
-Sensensus is a complete, end-to-end cyber-physical system built to eliminate blind trust in edge devices. We combine Edge AI (TinyML), Cryptographic Identity, and Web3 Economic Slashing to create a self-policing network of devices (a "swarm").
+Sensensus is a **zero-trust** cyber-physical system built to eliminate blind trust in edge devices. We solve the Oracle Problem by mathematically decoupling physical event detection from event verification. When an IoT node detects an anomaly, it cannot simply declare it as fact—it must prove the claim to a decentralized, staked swarm of peer verifier nodes.
 
-When a physical node detects an anomaly (such as a severe physical drop or impact), it cannot simply declare this event to the network as fact. It must mathematically prove its claim to a decentralized, staked quorum of peer nodes. If a node is caught lying or hallucinating data, a smart contract automatically slashes its staked funds and permanently damages its on-chain reputation.
+If a node is caught lying, deviating, or hallucinating data, the smart contract:
+
+* **Automatically slashes its funds**
+* **Permanently damages its on-chain reputation**
+
+This creates a cryptoeconomic truth layer for physical sensor events.
 
 ### Key Features
 * **Zero-Trust Hardware:** Raw sensor data is locally inferred using a 1D Convolutional Neural Network before ever touching the internet.
@@ -23,6 +30,33 @@ When a physical node detects an anomaly (such as a severe physical drop or impac
 * **HTTP x402 Data Tolls:** A unique implementation of the `402 Payment Required` protocol to prevent network spam and monetize hardware data buffering.
 * **Immutable Settlement:** Flow blockchain smart contracts handle all consensus logic, economic slashing, and ledger settlements autonomously.
 
+## Submission Details
+- **Code Status:** Protocol Labs — **Fresh Code** (built entirely during the hackathon)
+
+## Tracks Targeted
+
+### AI & Robotics
+- Swarm coordination frameworks
+- Verifiable AI
+- x402 agent-to-agent machine payment tolls
+
+### Crypto
+- DePIN sensor network
+- Novel economic slashing and governance
+- Contributor rewards for environmental or infrastructure data
+
+### Neurotech
+- Zero-trust verification for biometric and neurological edge sensors
+- Prevention of spoofed human-computer interface inputs
+- Swarm decision tools for real-time distributed consensus
+
+### Infrastructure & Digital Rights
+- Securing the physical data layer for a decentralized internet
+
+## Sponsor Bounties Integrated
+- **Flow:** Core consensus logic, escrow management, and economic slashing via the `SwarmVerifierV4.cdc` Cadence smart contract
+- **Storacha:** Decentralized immutable IPFS storage for verified machine learning CSV payloads post-consensus
+- **NEAR Protocol:** Integration for best new/continued project
 ---
 
 ## System Architecture & Event Lifecycle

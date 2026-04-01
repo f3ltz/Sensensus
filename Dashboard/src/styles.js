@@ -341,4 +341,42 @@ const CSS = `
   ::-webkit-scrollbar-track { background: var(--bg1); }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--amber-dim); }
-`;
+
+  .nav-btn {
+  font-family: var(--font-head);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  padding: 8px 18px;
+  border: 1px solid var(--amber-dim);
+  background: linear-gradient(
+    180deg,
+    rgba(245,166,35,0.10),
+    rgba(245,166,35,0.04)
+  );
+  color: var(--amber);
+  cursor: pointer;
+  text-transform: uppercase;
+  transition: all 0.18s ease;
+  position: relative;
+  overflow: hidden;
+  box-shadow:
+    inset 0 0 12px rgba(245,166,35,0.06),
+    0 0 10px rgba(245,166,35,0.08);
+}
+
+  .nav-btn:hover {
+    border-color: var(--amber);
+    color: #ffd27a;
+    box-shadow:
+      inset 0 0 18px rgba(245,166,35,0.12),
+      0 0 14px rgba(245,166,35,0.25);
+    transform: translateY(-1px);
+  }
+
+  .nav-btn:active {
+    transform: translateY(0);
+    box-shadow:
+      inset 0 0 18px rgba(245,166,35,0.16),
+      0 0 8px rgba(245,166,35,0.18);
+  }
+  `;
